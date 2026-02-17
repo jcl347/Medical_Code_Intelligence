@@ -1,0 +1,27 @@
+# Core ML / NLP
+torch>=2.0.0
+transformers>=4.36.0
+datasets>=2.16.0
+tokenizers>=0.15.0
+accelerate>=0.25.0
+
+# Evaluation
+seqeval>=1.2.2
+scikit-learn>=1.3.0
+
+# Experiment tracking & utilities
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.65.0
+pyyaml>=6.0
+jsonlines>=4.0.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Optional: wandb for experiment tracking
+# wandb>=0.16.0
