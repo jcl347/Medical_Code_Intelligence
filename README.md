@@ -1,17 +1,20 @@
 # Medical Code Intelligence
 
-**State-of-the-art Medical Coding NER system** for extracting and classifying medical entities from clinical text, with built-in negation detection and physician shorthand expansion.
+**State-of-the-art Medical Coding NER system** for extracting and classifying medical entities from clinical text, with built-in negation detection, physician shorthand expansion, and ICD-10-CM code mapping.
 
 ## Features
 
 - **Transformer-based NER** — Fine-tune PubMedBERT, BioBERT, Bio_ClinicalBERT, SciBERT, or GatorTron on biomedical NER datasets
-- **Public datasets** — Built-in loaders for NCBI Disease, BC5CDR, BC2GM, JNLPBA, LINNAEUS, and d4data/biomedical-ner-all (all via HuggingFace Hub)
+- **Public datasets** — Built-in loaders for NCBI Disease, BC5CDR, BC2GM, JNLPBA, LINNAEUS, d4data/biomedical-ner-all, and knowledgator/biomed_NER (all via HuggingFace Hub)
+- **ICD-10-CM code mapping** — 200+ curated codes with entity-to-code lookup (exact + fuzzy matching), chapter/block hierarchy, and batch coding
+- **ICD-specific datasets** — Support for span-annotated datasets (biomed_NER with DISORDER/MEDICAL_PROCEDURE/CLINICAL_DRUG), ICD-10 code lookup tables (72K codes), and instruction-formatted code prediction (1.4M pairs)
 - **Negation detection** — ConText/NegEx-style algorithm with 70+ trigger patterns, scope termination, pseudo-negation handling, and support for possibility/historical/family context
 - **Physician shorthand expansion** — 300+ medical abbreviations with context-sensitive disambiguation and character offset tracking
+- **Span-to-BIO conversion** — Automatic conversion of character-offset annotations to BIO tag sequences for datasets that use span format
 - **Optional CRF layer** — Conditional Random Field for structured label decoding
 - **Entity-level evaluation** — Strict entity-level precision/recall/F1 (seqeval or built-in fallback)
 - **Error analysis** — Automated boundary error, type confusion, and false positive/negative analysis
-- **Unified pipeline** — Single API chains shorthand expansion → NER → negation detection
+- **Unified pipeline** — Single API chains shorthand expansion → NER → negation detection → ICD coding
 
 ## Project Structure
 
@@ -23,9 +26,10 @@ Medical_Code_Intelligence/
 │   ├── clinical/
 │   │   ├── shorthand.py       # Physician abbreviation expansion (300+ terms)
 │   │   ├── negation.py        # NegEx/ConText negation detection
+│   │   ├── icd_codes.py       # ICD-10-CM code lookup + entity→code mapping
 │   │   └── pipeline.py        # Unified medical coding NER pipeline
 │   ├── data/
-│   │   ├── dataset_loader.py  # HuggingFace dataset loaders + normalisation
+│   │   ├── dataset_loader.py  # HuggingFace dataset loaders + span→BIO conversion
 │   │   ├── preprocessing.py   # Subword tokenization & label alignment
 │   │   └── data_utils.py      # Data collator, sliding window splitting
 │   ├── models/
@@ -44,7 +48,7 @@ Medical_Code_Intelligence/
 │   ├── evaluate.py            # Evaluation CLI with error analysis
 │   ├── predict.py             # Prediction CLI (interactive + batch)
 │   └── benchmark.py           # Multi-model x multi-dataset benchmarking
-├── tests/                     # 81 tests covering all modules
+├── tests/                     # 168 tests covering all modules
 ├── requirements.txt
 └── setup.py
 ```
@@ -63,6 +67,9 @@ pip install -r requirements.txt
 # Fine-tune PubMedBERT on NCBI Disease corpus
 python scripts/train.py --model pubmedbert --dataset ncbi_disease
 
+# Train on span-annotated biomedical NER (24 ICD-relevant entity types)
+python scripts/train.py --model pubmedbert --dataset biomed_ner
+
 # Fine-tune BioBERT on BC5CDR (chemicals + diseases)
 python scripts/train.py --model biobert --dataset bc5cdr --epochs 15 --lr 3e-5
 
@@ -70,7 +77,7 @@ python scripts/train.py --model biobert --dataset bc5cdr --epochs 15 --lr 3e-5
 python scripts/train.py --model pubmedbert --dataset ncbi_disease --use-crf
 ```
 
-### Run Predictions (with negation + shorthand)
+### Run Predictions (with negation + shorthand + ICD codes)
 
 ```bash
 # Interactive mode
@@ -104,13 +111,14 @@ python scripts/evaluate.py \
 ```bash
 python scripts/benchmark.py \
     --models pubmedbert biobert bio_clinicalbert \
-    --datasets ncbi_disease bc5cdr jnlpba
+    --datasets ncbi_disease bc5cdr jnlpba biomed_ner
 ```
 
 ## Python API
 
 ```python
 from src.clinical.pipeline import MedicalCodingPipeline
+from src.clinical.icd_codes import ICDCodeLookup
 
 # Full pipeline: shorthand expansion → NER → negation detection
 pipeline = MedicalCodingPipeline(
@@ -120,11 +128,48 @@ pipeline = MedicalCodingPipeline(
 )
 
 results = pipeline("Pt denies cp. Dx: dm2, htn.")
+
+# Map entities to ICD-10-CM codes
+lookup = ICDCodeLookup()
 for entity in results:
-    print(f"{entity.text} [{entity.label}] — {entity.negation}")
-    # chest pain [Disease] — negated
-    # type 2 diabetes mellitus [Disease] — affirmed
-    # hypertension [Disease] — affirmed
+    codes = lookup.match_entity(entity.text)
+    status = entity.negation.upper()
+    icd = codes[0].code if codes else "N/A"
+    print(f"{entity.text} [{entity.label}] — {status} — ICD: {icd}")
+    # chest pain [Disease] — NEGATED — ICD: R07.9
+    # type 2 diabetes mellitus [Disease] — AFFIRMED — ICD: E11.9
+    # hypertension [Disease] — AFFIRMED — ICD: I10
+```
+
+### ICD-10-CM Code Lookup
+
+```python
+from src.clinical.icd_codes import ICDCodeLookup
+
+lookup = ICDCodeLookup()
+
+# Direct entity text → ICD code
+matches = lookup.match_entity("congestive heart failure")
+# [ICDMatch(code='I50.9', description='Heart failure, unspecified', score=1.0, match_type='exact')]
+
+# Fuzzy token-overlap matching
+matches = lookup.match_entity("acute pancreatitis", top_k=3)
+# Returns candidates ranked by token overlap score
+
+# Code lookup
+code = lookup.lookup_code("E11.9")
+# ICDCode(code='E11.9', description='Type 2 diabetes mellitus without complications', chapter='Endocrine/metabolic')
+
+# Batch entity → code mapping
+entities = [
+    {"text": "hypertension", "label": "Disease"},
+    {"text": "pneumonia", "label": "Disease"},
+]
+results = lookup.match_entities_batch(entities, top_k=3)
+# Each entity enriched with 'icd_codes' key
+
+# Load full 72K code set from HuggingFace
+lookup = ICDCodeLookup(load_from_hf=True)
 ```
 
 ### Negation Detection Only
@@ -152,6 +197,21 @@ text = expander.expand("pt c/o sob, htn well controlled on meds")
 # "patient complaining of shortness of breath, hypertension well controlled on meds"
 ```
 
+### Span-to-BIO Conversion
+
+```python
+from src.data.dataset_loader import spans_to_bio
+
+text = "Patient has congestive heart failure and diabetes."
+entities = [
+    {"start": 12, "end": 36, "class": "DISORDER"},
+    {"start": 41, "end": 49, "class": "DISORDER"},
+]
+tokens, labels = spans_to_bio(text, entities)
+# tokens: ['Patient', 'has', 'congestive', 'heart', 'failure', 'and', 'diabetes.']
+# labels: ['O', 'O', 'B-DISORDER', 'I-DISORDER', 'I-DISORDER', 'O', 'B-DISORDER']
+```
+
 ## Supported Models
 
 | Key | Model | Description |
@@ -164,13 +224,33 @@ text = expander.expand("pt c/o sob, htn well controlled on meds")
 
 ## Supported Datasets
 
-| Key | Source | Entity Types |
-|-----|--------|-------------|
-| `ncbi_disease` | NCBI Disease Corpus | Disease |
-| `bc5cdr` | BioCreative V CDR | Chemical, Disease |
-| `bc2gm` | BioCreative II GM | Gene |
-| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type |
-| `biomedical_ner_all` | d4data combined | 10+ entity types |
+### Token-level NER Datasets
+
+| Key | Source | Entity Types | Format |
+|-----|--------|-------------|--------|
+| `ncbi_disease` | NCBI Disease Corpus | Disease | BIO tags |
+| `bc5cdr` | BioCreative V CDR | Chemical, Disease | BIO tags |
+| `bc2gm` | BioCreative II GM | Gene | BIO tags |
+| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | BIO tags |
+| `biomedical_ner_all` | d4data combined | 10+ entity types | BIO tags |
+| `biomed_ner` | knowledgator/biomed_NER | DISORDER, MEDICAL_PROCEDURE, CLINICAL_DRUG, ANATOMICAL_STRUCTURE + 20 more | Span → BIO |
+
+### ICD Code Datasets
+
+| Key | Source | Description | Format |
+|-----|--------|-------------|--------|
+| `icd10_terminology` | awacke1/ICD10-Clinical-Terminology | 72,750 ICD-10-CM code/description pairs | Code lookup |
+| `icd10_code_description` | wangyichen25/ICD-10-CM_Code-Description_Pairs | 1.4M description→code pairs | Instruction |
+
+## ICD-10-CM Code Knowledge Base
+
+The built-in `ICDCodeLookup` includes:
+
+- **200+ curated high-frequency ICD-10-CM codes** covering 11 chapters (infectious diseases, neoplasms, endocrine/metabolic, mental health, circulatory, respiratory, digestive, genitourinary, symptoms/signs, injury, and health status factors)
+- **120+ entity-to-code mappings** for common clinical conditions (hypertension→I10, diabetes→E11.9, pneumonia→J18.9, etc.)
+- **Tiered matching strategy**: exact entity match → token-overlap fuzzy matching
+- **Chapter/hierarchy awareness**: each code annotated with its ICD-10-CM chapter
+- **Expandable**: load full 72K code set from HuggingFace with `load_from_hf=True`
 
 ## Training Best Practices
 
@@ -202,4 +282,4 @@ The negation module implements a ConText/NegEx-style algorithm with:
 python -m pytest tests/ -v
 ```
 
-81 tests covering shorthand expansion, negation detection, pipeline integration, tokenization alignment, label mapping, and sliding window splitting.
+168 tests covering ICD code lookup, entity-to-code mapping, span-to-BIO conversion, ICD dataset configs, ICD pipeline integration, shorthand expansion, negation detection, pipeline integration, tokenization alignment, label mapping, and sliding window splitting.

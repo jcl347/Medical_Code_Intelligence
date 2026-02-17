@@ -31,7 +31,7 @@ wandb/
 
 # Data cache
 .cache/
-data/
+/data/
 
 # Jupyter
 .ipynb_checkpoints/

@@ -84,6 +84,48 @@ DATASET_CONFIGS = {
         "label_column": "ner_tags",
         "token_column": "tokens",
     },
+    # -------------------------------------------------------------------
+    # ICD-specific and clinical coding datasets
+    # -------------------------------------------------------------------
+    "biomed_ner": {
+        "hf_name": "knowledgator/biomed_NER",
+        "description": (
+            "Biomedical NER with 24 entity types including DISORDER, "
+            "MEDICAL_PROCEDURE, CLINICAL_DRUG, ANATOMICAL_STRUCTURE. "
+            "Span-annotated (char offsets); converted to BIO at load time."
+        ),
+        "entity_types": [
+            "DISORDER", "MEDICAL_PROCEDURE", "CLINICAL_DRUG",
+            "ANATOMICAL_STRUCTURE", "PHENOTYPE", "CHEMICALS",
+            "GENE_AND_GENE_PRODUCTS", "ORGANISM", "CELLS_AND_THEIR_COMPONENTS",
+            "SIGNALING_MOLECULES", "BODY_SUBSTANCE", "FUNCTION", "ACTIVITY",
+        ],
+        "format": "span",  # uses char-offset annotations, not BIO columns
+        "text_column": "text",
+        "entities_column": "entities",
+    },
+    "icd10_terminology": {
+        "hf_name": "awacke1/ICD10-Clinical-Terminology",
+        "description": (
+            "72,750 ICD-10-CM code/description pairs. Not a token-level NER "
+            "dataset; used as a lookup table for entity→code mapping."
+        ),
+        "entity_types": ["ICD10_Code"],
+        "code_column": "Code",
+        "description_column": "Description",
+        "format": "code_lookup",
+    },
+    "icd10_code_description": {
+        "hf_name": "wangyichen25/ICD-10-CM_Code-Description_Pairs",
+        "description": (
+            "1.4M ICD-10-CM description→code pairs for training code "
+            "prediction models. Instruction-formatted."
+        ),
+        "entity_types": ["ICD10_Code"],
+        "format": "instruction",
+        "input_column": "input",
+        "output_column": "output",
+    },
 }
 
 
