@@ -23,13 +23,20 @@ diagnosable condition; the downstream ICD-10-CM code resolution step
 import logging
 from typing import List, Optional, Tuple
 
-from datasets import DatasetDict, concatenate_datasets, load_dataset
+from datasets import DatasetDict, Features, Sequence, Value, concatenate_datasets, load_dataset
 
 logger = logging.getLogger(__name__)
 
 # Unified label scheme for ICD NER
 ICD_NER_LABELS: List[str] = ["O", "B-DIAGNOSIS", "I-DIAGNOSIS"]
 ICD_NER_LABEL2ID = {label: i for i, label in enumerate(ICD_NER_LABELS)}
+
+# Common feature schema so concatenation always succeeds
+_UNIFIED_FEATURES = Features({
+    "tokens": Sequence(Value("string")),
+    "ner_tags": Sequence(Value("int64")),
+    "ner_labels": Sequence(Value("string")),
+})
 
 
 def load_icd_ner_dataset(
@@ -73,7 +80,11 @@ def load_icd_ner_dataset(
     )
     bc5cdr = _normalize_bc5cdr_to_diagnosis(bc5cdr)
 
-    # --- Merge corresponding splits ---
+    # --- Cast to common schema (strips ClassLabel metadata) and merge ---
+    for ds in (ncbi, bc5cdr):
+        for split in list(ds.keys()):
+            ds[split] = ds[split].cast(_UNIFIED_FEATURES)
+
     merged = {}
     for split in ["train", "validation", "test"]:
         parts = []
