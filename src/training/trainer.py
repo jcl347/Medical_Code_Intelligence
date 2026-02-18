@@ -52,7 +52,7 @@ def build_training_args(config: NERConfig) -> TrainingArguments:
         # Optimiser
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=config.warmup_ratio,
         max_grad_norm=config.max_grad_norm,
         lr_scheduler_type=config.lr_scheduler_type,
         # Mixed precision
@@ -69,7 +69,6 @@ def build_training_args(config: NERConfig) -> TrainingArguments:
         metric_for_best_model="f1",
         greater_is_better=True,
         # Logging
-        logging_dir=os.path.join(output_dir, "logs"),
         logging_steps=config.logging_steps,
         logging_first_step=True,
         report_to="wandb" if config.use_wandb else "none",
@@ -134,7 +133,7 @@ def build_trainer(
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
