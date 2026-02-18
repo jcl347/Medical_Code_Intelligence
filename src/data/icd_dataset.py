@@ -128,7 +128,15 @@ def _normalize_ncbi_to_diagnosis(dataset: DatasetDict) -> DatasetDict:
 
 def _normalize_bc5cdr_to_diagnosis(dataset: DatasetDict) -> DatasetDict:
     """Keep Disease → DIAGNOSIS, drop Chemical → O from BC5CDR."""
-    label_names = dataset["train"].features["tags"].feature.names
+    # The parquet revision stores tags as plain ints (no ClassLabel metadata),
+    # so we provide the canonical label names as a fallback.
+    _BC5CDR_LABELS = ["O", "B-Chemical", "I-Chemical", "B-Disease", "I-Disease"]
+
+    tag_feature = dataset["train"].features["tags"].feature
+    if hasattr(tag_feature, "names"):
+        label_names = tag_feature.names
+    else:
+        label_names = _BC5CDR_LABELS
 
     # Build mapping: Disease labels → DIAGNOSIS, everything else → O
     name_map = {}
