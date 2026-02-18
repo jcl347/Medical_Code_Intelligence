@@ -29,6 +29,25 @@ logger = logging.getLogger(__name__)
 
 # Unified label scheme for ICD NER
 ICD_NER_LABELS: List[str] = ["O", "B-DIAGNOSIS", "I-DIAGNOSIS"]
+
+# ---------------------------------------------------------------------------
+# Garbage label cleaning
+# ---------------------------------------------------------------------------
+
+# Lowercase tokens that should never be standalone DIAGNOSIS entities.
+# These appear in the source corpora due to broken BIO alignment where
+# function words inside multi-word disease mentions got isolated B-DIAGNOSIS
+# tags (e.g. "of" 154x, "and" 145x, "the" 72x in the combined corpus).
+_GARBAGE_STANDALONE_TOKENS = frozenset({
+    # Function words / prepositions / conjunctions
+    "a", "an", "the", "of", "and", "or", "in", "on", "to", "for", "by",
+    "with", "from", "at", "as", "is", "are", "was", "were", "be", "been",
+    "not", "no", "nor", "but", "so", "if", "it", "its", "that", "this",
+    "than", "then", "has", "had", "have", "do", "does", "did",
+    # Punctuation / noise (tokens that look like words)
+    "type", "due",
+    # Single characters (except legit abbreviations handled separately)
+})
 ICD_NER_LABEL2ID = {label: i for i, label in enumerate(ICD_NER_LABELS)}
 
 # Common feature schema so concatenation always succeeds
@@ -37,6 +56,58 @@ _UNIFIED_FEATURES = Features({
     "ner_tags": Sequence(Value("int64")),
     "ner_labels": Sequence(Value("string")),
 })
+
+
+def _clean_garbage_labels(dataset: DatasetDict) -> DatasetDict:
+    """
+    Fix broken BIO annotations in the merged corpus.
+
+    The source corpora (NCBI Disease, BC5CDR) contain isolated B-DIAGNOSIS
+    tags on function words like "of", "and", "the" — leftovers from
+    multi-word disease mentions whose surrounding B/I tokens were lost
+    during format conversion.  These garbage labels hurt model precision.
+
+    Rules:
+    - A standalone B-DIAGNOSIS (not followed by I-DIAGNOSIS) on a
+      lowercase token that appears in ``_GARBAGE_STANDALONE_TOKENS``
+      is flipped to O.
+    - Uppercase tokens (e.g. AS, AT, WAS) are preserved — they are
+      legitimate disease abbreviations.
+    - Single-character lowercase tokens (e.g. "a") are also flipped to O.
+    """
+
+    def _map(example):
+        tokens = example["tokens"]
+        labels = list(example["ner_labels"])
+        n = len(labels)
+        cleaned = 0
+
+        for i in range(n):
+            if labels[i] != "B-DIAGNOSIS":
+                continue
+
+            # Check if this B- has a following I- (part of a real entity)
+            has_continuation = (i + 1 < n and labels[i + 1] == "I-DIAGNOSIS")
+            if has_continuation:
+                continue
+
+            token = tokens[i]
+            # Preserve uppercase tokens (legitimate abbreviations like AS, AT)
+            if token.isupper() and len(token) >= 2:
+                continue
+
+            # Clean garbage: lowercase function words and single chars
+            if token.lower() in _GARBAGE_STANDALONE_TOKENS or len(token) <= 1:
+                labels[i] = "O"
+                cleaned += 1
+
+        return {
+            "tokens": tokens,
+            "ner_tags": [ICD_NER_LABEL2ID[lab] for lab in labels],
+            "ner_labels": labels,
+        }
+
+    return dataset.map(_map, desc="Cleaning garbage labels")
 
 
 def load_icd_ner_dataset(
@@ -79,6 +150,11 @@ def load_icd_ner_dataset(
         revision="refs/convert/parquet",
     )
     bc5cdr = _normalize_bc5cdr_to_diagnosis(bc5cdr)
+
+    # --- Clean garbage standalone B-DIAGNOSIS on function words ---
+    logger.info("  Cleaning garbage labels from merged corpus...")
+    ncbi = _clean_garbage_labels(ncbi)
+    bc5cdr = _clean_garbage_labels(bc5cdr)
 
     # --- Cast to common schema (strips ClassLabel metadata) and merge ---
     for ds in (ncbi, bc5cdr):

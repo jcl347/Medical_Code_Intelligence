@@ -6,7 +6,6 @@ with support for both standard softmax and CRF decoding.
 """
 
 import logging
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -19,26 +18,9 @@ from transformers import (
     pipeline,
 )
 
+from src.inference.entity_utils import NEREntity, post_process_entities
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class NEREntity:
-    """A single recognized entity."""
-    text: str
-    label: str
-    start_char: int
-    end_char: int
-    score: float
-
-    def to_dict(self) -> Dict:
-        return {
-            "text": self.text,
-            "label": self.label,
-            "start": self.start_char,
-            "end": self.end_char,
-            "score": round(self.score, 4),
-        }
 
 
 class NERPredictor:
@@ -131,13 +113,13 @@ class NERPredictor:
                 score=r.get("score", 0.0),
             )
             entities.append(entity)
-        return entities
+        return post_process_entities(entities, text)
 
     def predict_batch(self, texts: List[str]) -> List[List[NEREntity]]:
         """Run NER on a batch of texts."""
         all_results = self._pipeline(texts)
         batch_entities = []
-        for raw_results in all_results:
+        for text_str, raw_results in zip(texts, all_results):
             entities = []
             if isinstance(raw_results, dict):
                 raw_results = [raw_results]
@@ -150,7 +132,7 @@ class NERPredictor:
                     score=r.get("score", 0.0),
                 )
                 entities.append(entity)
-            batch_entities.append(entities)
+            batch_entities.append(post_process_entities(entities, text_str))
         return batch_entities
 
     @torch.no_grad()

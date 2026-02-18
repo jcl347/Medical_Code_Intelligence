@@ -12,6 +12,7 @@ import pytest
 from src.data.icd_dataset import (
     ICD_NER_LABELS,
     ICD_NER_LABEL2ID,
+    _clean_garbage_labels,
     _normalize_ncbi_to_diagnosis,
     _normalize_bc5cdr_to_diagnosis,
 )
@@ -187,6 +188,114 @@ class TestBC5CDRNormalization:
         for example in result["train"]:
             for label in example["ner_labels"]:
                 assert label in ICD_NER_LABELS, f"Unexpected label: {label}"
+
+
+# ---------------------------------------------------------------------------
+# Garbage label cleaning
+# ---------------------------------------------------------------------------
+
+class TestGarbageLabelCleaning:
+    """Test _clean_garbage_labels removes broken standalone B-DIAGNOSIS."""
+
+    def _make_dataset(self, tokens_list, labels_list):
+        """Helper to build a DatasetDict from tokens and string labels."""
+        from datasets import Dataset, DatasetDict
+        data = {
+            "tokens": tokens_list,
+            "ner_tags": [
+                [ICD_NER_LABEL2ID[lab] for lab in labs]
+                for labs in labels_list
+            ],
+            "ner_labels": labels_list,
+        }
+        return DatasetDict({"train": Dataset.from_dict(data)})
+
+    def test_standalone_of_becomes_o(self):
+        """Standalone 'of' with B-DIAGNOSIS should become O."""
+        ds = self._make_dataset(
+            [["evidence", "of", "disease"]],
+            [["O", "B-DIAGNOSIS", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        assert labels[1] == "O"
+        # "disease" is a real standalone entity — should be preserved
+        assert labels[2] == "B-DIAGNOSIS"
+
+    def test_standalone_and_becomes_o(self):
+        ds = self._make_dataset(
+            [["cancer", "and", "tumor"]],
+            [["B-DIAGNOSIS", "B-DIAGNOSIS", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        assert labels[0] == "B-DIAGNOSIS"
+        assert labels[1] == "O"  # "and" cleaned
+        assert labels[2] == "B-DIAGNOSIS"
+
+    def test_standalone_the_becomes_o(self):
+        ds = self._make_dataset(
+            [["the", "patient"]],
+            [["B-DIAGNOSIS", "O"]],
+        )
+        result = _clean_garbage_labels(ds)
+        assert result["train"][0]["ner_labels"][0] == "O"
+
+    def test_uppercase_abbreviation_preserved(self):
+        """Uppercase disease abbreviations (AS, AT, WAS) should NOT be cleaned."""
+        ds = self._make_dataset(
+            [["has", "AS", "and", "AT"]],
+            [["O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        assert labels[1] == "B-DIAGNOSIS"  # AS preserved
+        assert labels[3] == "B-DIAGNOSIS"  # AT preserved
+
+    def test_multi_word_entity_not_cleaned(self):
+        """B-DIAGNOSIS followed by I-DIAGNOSIS should never be cleaned."""
+        ds = self._make_dataset(
+            [["of", "the", "heart"]],
+            [["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        # "of" has continuation, so it's kept as part of a multi-word entity
+        assert labels == ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]
+
+    def test_single_lowercase_char_cleaned(self):
+        """Single lowercase characters should be cleaned."""
+        ds = self._make_dataset(
+            [["x", "disease"]],
+            [["B-DIAGNOSIS", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        assert labels[0] == "O"
+        assert labels[1] == "B-DIAGNOSIS"
+
+    def test_legitimate_standalone_disease_preserved(self):
+        """Real disease names should not be cleaned."""
+        ds = self._make_dataset(
+            [["diabetes", "and", "cancer"]],
+            [["B-DIAGNOSIS", "O", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        labels = result["train"][0]["ner_labels"]
+        assert labels[0] == "B-DIAGNOSIS"
+        assert labels[2] == "B-DIAGNOSIS"
+
+    def test_tags_updated_consistently(self):
+        """ner_tags should match ner_labels after cleaning."""
+        ds = self._make_dataset(
+            [["the", "disease"]],
+            [["B-DIAGNOSIS", "B-DIAGNOSIS"]],
+        )
+        result = _clean_garbage_labels(ds)
+        tags = result["train"][0]["ner_tags"]
+        labels = result["train"][0]["ner_labels"]
+        for tag, label in zip(tags, labels):
+            assert tag == ICD_NER_LABEL2ID[label]
 
 
 # ---------------------------------------------------------------------------
