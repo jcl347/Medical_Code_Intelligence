@@ -74,11 +74,18 @@ class NERPredictor:
         self.device = device
         self.aggregation_strategy = aggregation_strategy
 
-        # Resolve relative local paths so transformers doesn't treat them as
-        # HuggingFace repo IDs (e.g. "outputs/best_model" → "/abs/outputs/best_model")
+        # Resolve local paths so transformers doesn't treat them as HF repo IDs.
+        # A valid HF repo ID has at most one "/" (namespace/repo); paths with more
+        # separators or that exist on disk are always local.
         import os
-        if os.path.isdir(model_path):
-            model_path = os.path.abspath(model_path)
+        abs_path = os.path.abspath(model_path)
+        if os.path.isdir(abs_path):
+            model_path = abs_path
+        elif os.sep in model_path or model_path.count("/") > 1:
+            raise FileNotFoundError(
+                f"Model directory not found: '{abs_path}'. "
+                f"Train a model first or provide a valid HuggingFace model ID."
+            )
 
         logger.info("Loading NER model from '%s' on device '%s'...", model_path, device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)

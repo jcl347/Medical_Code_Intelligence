@@ -44,7 +44,6 @@ def build_training_args(config: NERConfig) -> TrainingArguments:
 
     return TrainingArguments(
         output_dir=output_dir,
-        overwrite_output_dir=True,
         # Training schedule
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
