@@ -155,16 +155,37 @@ def main():
     )
 
     # Determine eval split name
-    eval_split = "validation" if "validation" in tokenized_dataset else "test"
-    logger.info("Using '%s' split for evaluation.", eval_split)
+    if "validation" in tokenized_dataset:
+        eval_split = "validation"
+    elif "test" in tokenized_dataset:
+        eval_split = "test"
+    else:
+        eval_split = None
+
+    if eval_split is not None:
+        logger.info("Using '%s' split for evaluation.", eval_split)
+        train_ds = tokenized_dataset["train"]
+        eval_ds = tokenized_dataset[eval_split]
+    else:
+        # Dataset has only a 'train' split — auto-split 90/10
+        logger.info(
+            "No validation or test split found. Auto-splitting train into "
+            "90%% train / 10%% eval."
+        )
+        split = tokenized_dataset["train"].train_test_split(
+            test_size=0.1, seed=config.seed,
+        )
+        train_ds = split["train"]
+        eval_ds = split["test"]
+        eval_split = "auto_eval"
 
     # 4. Build trainer
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
         config=config,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset[eval_split],
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
         label_list=label_list,
     )
 
