@@ -214,6 +214,11 @@ def main():
     logger.info("=" * 60)
     logger.info("TRAINING COMPLETE")
     logger.info("=" * 60)
+    logger.info(
+        "To run predictions:\n"
+        "  python scripts/predict.py --model-path %s --text \"your text here\"",
+        best_model_dir,
+    )
 
 
 if __name__ == "__main__":
