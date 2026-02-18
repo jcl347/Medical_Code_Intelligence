@@ -50,6 +50,8 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device (cpu/cuda)")
     parser.add_argument("--no-shorthand", action="store_true", help="Disable shorthand expansion")
     parser.add_argument("--no-negation", action="store_true", help="Disable negation detection")
+    parser.add_argument("--icd-codes", action="store_true", help="Resolve entities to ICD-10-CM codes")
+    parser.add_argument("--icd-top-k", type=int, default=3, help="Number of ICD candidates per entity")
     return parser.parse_args()
 
 
@@ -59,6 +61,8 @@ def main():
         model_path=args.model_path,
         expand_shorthand=not args.no_shorthand,
         detect_negation=not args.no_negation,
+        resolve_icd_codes=args.icd_codes,
+        icd_top_k=args.icd_top_k,
         device=args.device,
     )
 

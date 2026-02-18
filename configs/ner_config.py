@@ -89,6 +89,17 @@ DATASET_CONFIGS = {
     # -------------------------------------------------------------------
     # ICD-specific and clinical coding datasets
     # -------------------------------------------------------------------
+    "icd_ner": {
+        "hf_name": "composite:ncbi_disease+bc5cdr",
+        "description": (
+            "ICD-focused composite NER dataset. Combines NCBI Disease "
+            "(6.9K sentences) + BC5CDR disease subset (1.5K abstracts) "
+            "with a unified DIAGNOSIS entity type for training models "
+            "that feed into ICD-10-CM code resolution."
+        ),
+        "entity_types": ["DIAGNOSIS"],
+        "format": "composite",
+    },
     "biomed_ner": {
         "hf_name": "knowledgator/biomed_NER",
         "description": (

@@ -216,6 +216,13 @@ def load_ner_dataset(
             f"Available: {list(DATASET_CONFIGS.keys())}"
         )
 
+    # Composite datasets have their own loaders
+    if DATASET_CONFIGS[dataset_key].get("format") == "composite":
+        if dataset_key == "icd_ner":
+            from src.data.icd_dataset import load_icd_ner_dataset
+            return load_icd_ner_dataset(cache_dir=cache_dir)
+        raise ValueError(f"No loader for composite dataset '{dataset_key}'.")
+
     cfg = DATASET_CONFIGS[dataset_key]
 
     # Non-NER datasets (code lookups, instruction data) can't be loaded as NER

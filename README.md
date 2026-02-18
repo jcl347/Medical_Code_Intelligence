@@ -1,181 +1,142 @@
 # Medical Code Intelligence
 
-**Data-driven Medical Coding NER system** for extracting and classifying medical entities from clinical text, with learned assertion detection, physician shorthand expansion, and ICD-10-CM entity linking.
+**ICD-10 NER system** for extracting diagnosis mentions from clinical text, resolving them to ICD-10-CM codes, with learned assertion detection and physician shorthand expansion.
 
-## Features
+## End-to-End ICD NER Pipeline
 
-- **Transformer-based NER** — Fine-tune PubMedBERT, BioBERT, Bio_ClinicalBERT, SciBERT, or GatorTron on biomedical NER datasets
-- **Public datasets** — Built-in loaders for NCBI Disease, BC5CDR, BC2GM, JNLPBA, LINNAEUS, d4data/biomedical-ner-all, and knowledgator/biomed_NER (all via HuggingFace Hub)
-- **Data-driven ICD-10-CM entity linking** — Loads the full 51K ICD-10-CM code set from [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) (MIT licensed), builds a TF-IDF character n-gram index following [SciSpacy's](https://github.com/allenai/scispacy) EntityLinker architecture for fast entity-to-code matching
-- **Transformer-based assertion detection** — Wraps [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) (ClinicalBERT fine-tuned on i2b2) for learned PRESENT/ABSENT/POSSIBLE classification, as an alternative to rule-based NegEx/ConText
-- **Rule-based negation detection** — ConText/NegEx-style algorithm with 70+ trigger patterns, scope termination, pseudo-negation handling, and support for possibility/historical/family context
-- **Data-driven abbreviation expansion** — Loads 104K medical abbreviations from the [Meta-Inventory](https://zenodo.org/records/4567594) (CC-BY-4.0), with [MEDIALpy](https://pypi.org/project/medialpy/) fallback and ~280 hand-curated clinical abbreviations as built-in default. Supports contextual disambiguation via [MeDAL ELECTRA](https://huggingface.co/McGill-NLP/electra-medal) for ambiguous terms
-- **Span-to-BIO conversion** — Automatic conversion of character-offset annotations to BIO tag sequences for datasets that use span format
-- **Optional CRF layer** — Conditional Random Field for structured label decoding
-- **Entity-level evaluation** — Strict entity-level precision/recall/F1 (seqeval or built-in fallback)
-- **Error analysis** — Automated boundary error, type confusion, and false positive/negative analysis
-- **Unified pipeline** — Single API chains shorthand expansion → NER → negation/assertion → ICD coding
-
-## Project Structure
+The core workflow: **Train** a diagnosis NER model, **Predict** entities from clinical text, **Resolve** to ICD-10-CM codes, **Evaluate** with entity-level F1.
 
 ```
-Medical_Code_Intelligence/
-├── configs/
-│   └── ner_config.py          # Model, dataset, and training configs
-├── src/
-│   ├── clinical/
-│   │   ├── shorthand.py                # Data-driven abbreviation expansion (Meta-Inventory + fallback)
-│   │   ├── abbreviation_disambiguator.py  # MeDAL ELECTRA contextual disambiguation
-│   │   ├── _shorthand_fallback.py      # Built-in ~280 clinical abbreviations
-│   │   ├── negation.py                 # NegEx/ConText rule-based negation detection
-│   │   ├── assertion.py                # Transformer-based assertion classifier (bvanaken model)
-│   │   ├── icd_codes.py                # Data-driven ICD-10-CM TF-IDF entity linker
-│   │   ├── _icd_fallback.py            # Minimal offline fallback codes (~45 high-frequency)
-│   │   └── pipeline.py                 # Unified medical coding NER pipeline
-│   ├── data/
-│   │   ├── dataset_loader.py  # HuggingFace dataset loaders + span→BIO conversion
-│   │   ├── preprocessing.py   # Subword tokenization & label alignment
-│   │   └── data_utils.py      # Data collator, sliding window splitting
-│   ├── models/
-│   │   ├── ner_model.py       # Model builder (AutoModelForTokenClassification)
-│   │   └── crf_model.py       # Optional CRF layer for structured prediction
-│   ├── training/
-│   │   ├── trainer.py         # HuggingFace Trainer with SOTA config
-│   │   └── callbacks.py       # Early stopping with logging
-│   ├── evaluation/
-│   │   ├── metrics.py         # Entity-level F1 (seqeval + fallback)
-│   │   └── error_analysis.py  # Detailed error categorisation
-│   └── inference/
-│       └── predictor.py       # Inference pipeline with batching
-├── scripts/
-│   ├── train.py               # Training CLI
-│   ├── evaluate.py            # Evaluation CLI with error analysis
-│   ├── predict.py             # Prediction CLI (interactive + batch)
-│   └── benchmark.py           # Multi-model x multi-dataset benchmarking
-├── tests/                     # 211 tests covering all modules
-├── requirements.txt
-└── setup.py
+Clinical Text ─→ Shorthand Expansion ─→ NER (DIAGNOSIS) ─→ Negation Detection ─→ ICD-10-CM Resolution
+                                         │                                         │
+  "Pt denies cp"    "Patient denies      "chest pain"         NEGATED              R07.9
+                     chest pain"          [DIAGNOSIS]                               Chest pain,
+                                                                                   unspecified
 ```
 
-## Quick Start
-
-### Installation
+### Step 1: Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Train a Model
+### Step 2: Train on the ICD NER Dataset
+
+The `icd_ner` dataset combines NCBI Disease (6.9K sentences) + BC5CDR disease subset (1.5K abstracts) into a single corpus with a unified `DIAGNOSIS` entity type. Chemical entities from BC5CDR are filtered out — the model learns only to detect diagnosable conditions.
 
 ```bash
-# Fine-tune PubMedBERT on NCBI Disease corpus
-python scripts/train.py --model pubmedbert --dataset ncbi_disease
+# Train PubMedBERT on the ICD NER composite dataset
+python scripts/train.py --model pubmedbert --dataset icd_ner
 
-# Train on span-annotated biomedical NER (24 ICD-relevant entity types)
-python scripts/train.py --model pubmedbert --dataset biomed_ner
+# Train Bio_ClinicalBERT (pre-trained on MIMIC-III clinical notes)
+python scripts/train.py --model bio_clinicalbert --dataset icd_ner --lr 3e-5
 
-# Fine-tune BioBERT on BC5CDR (chemicals + diseases)
-python scripts/train.py --model biobert --dataset bc5cdr --epochs 15 --lr 3e-5
+# Train with CRF layer for structured label decoding
+python scripts/train.py --model pubmedbert --dataset icd_ner --use-crf
 
-# Train with CRF layer
-python scripts/train.py --model pubmedbert --dataset ncbi_disease --use-crf
+# Custom hyperparameters
+python scripts/train.py --model pubmedbert --dataset icd_ner \
+    --epochs 15 --batch-size 32 --lr 3e-5 --patience 3
 ```
 
-### Run Predictions (with negation + shorthand + ICD codes)
+The model is saved automatically to `outputs/pubmedbert_icd_ner/best_model/` (based on best validation F1).
+
+### Step 3: Predict with ICD Code Resolution
 
 ```bash
+# Single text with ICD code resolution
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --text "Pt denies cp or sob. Hx of dm2 and htn." \
+    --icd-codes
+
 # Interactive mode
-python scripts/predict.py --model-path outputs/pubmedbert_ncbi_disease/best_model
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --icd-codes
 
-# Single text
-python scripts/predict.py --model-path outputs/pubmedbert_ncbi_disease/best_model \
-    --text "Pt denies cp or sob. Hx of dm2 and htn."
+# Batch prediction from file
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --input-file data/notes.txt --output-file results.json \
+    --icd-codes --icd-top-k 5
 ```
 
-Example output:
+Expected output:
 ```
 Pt denies cp or sob. Hx of dm2 and htn.
 
-  [chest pain](Disease, NEGATED, trigger="denies", from="cp", score=0.950)
-  [shortness of breath](Disease, NEGATED, trigger="denies", from="sob", score=0.930)
-  [type 2 diabetes mellitus](Disease, HISTORICAL, trigger="hx", from="dm2", score=0.970)
-  [hypertension](Disease, HISTORICAL, trigger="hx", from="htn", score=0.960)
+  [chest pain](DIAGNOSIS, NEGATED, trigger="denies", from="cp", ICD=R07.9, score=0.950)
+  [shortness of breath](DIAGNOSIS, NEGATED, trigger="denies", from="sob", ICD=R06.02, score=0.930)
+  [type 2 diabetes mellitus](DIAGNOSIS, HISTORICAL, trigger="hx", from="dm2", ICD=E11.9, score=0.970)
+  [hypertension](DIAGNOSIS, HISTORICAL, trigger="hx", from="htn", ICD=I10, score=0.960)
 ```
 
-### Evaluate
+### Step 4: Evaluate
 
 ```bash
+# Entity-level F1 on the ICD NER test set
 python scripts/evaluate.py \
-    --model-path outputs/pubmedbert_ncbi_disease/best_model \
-    --dataset ncbi_disease --error-analysis
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset icd_ner
+
+# With detailed error analysis (boundary errors, false positives/negatives)
+python scripts/evaluate.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset icd_ner --error-analysis
 ```
 
-### Benchmark Multiple Models
+### Step 5: Benchmark Models
 
 ```bash
 python scripts/benchmark.py \
     --models pubmedbert biobert bio_clinicalbert \
-    --datasets ncbi_disease bc5cdr jnlpba biomed_ner
+    --datasets icd_ner ncbi_disease bc5cdr
 ```
 
-## Available Datasets & How to Use Them
+## Python API
 
-### NER Training Datasets
+### Full Pipeline: Shorthand → NER → Negation → ICD Coding
 
-These datasets provide token- or span-level entity annotations for training NER models.
+```python
+from src.clinical.pipeline import MedicalCodingPipeline
 
-| Key | Source | Entity Types | Size |
-|-----|--------|-------------|------|
-| `ncbi_disease` | NCBI Disease Corpus | Disease | 6.9K sentences |
-| `bc5cdr` | BioCreative V CDR | Chemical, Disease | 1.5K abstracts |
-| `bc2gm` | BioCreative II GM | Gene | 20K sentences |
-| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | 22K sentences |
-| `biomedical_ner_all` | d4data combined | 10+ entity types | 25K+ samples |
-| `biomed_ner` | knowledgator/biomed_NER | 24 types (DISORDER, MEDICAL_PROCEDURE, CLINICAL_DRUG, ...) | Span-annotated |
+# All-in-one pipeline with ICD resolution built in
+pipeline = MedicalCodingPipeline(
+    model_path="outputs/pubmedbert_icd_ner/best_model",
+    expand_shorthand=True,
+    detect_negation=True,
+    negation_strategy="rules",      # or "transformer" for learned assertion
+    resolve_icd_codes=True,         # enable ICD-10-CM resolution
+    icd_top_k=3,                    # top-3 candidate codes per entity
+)
 
-**Train on a specific dataset:**
+results = pipeline("Pt denies cp. Dx: dm2, htn.")
 
-```bash
-# Disease NER (most common starting point)
-python scripts/train.py --model pubmedbert --dataset ncbi_disease
-
-# Chemical + Disease NER
-python scripts/train.py --model biobert --dataset bc5cdr
-
-# Broad biomedical NER with 24 entity types (ICD-relevant)
-python scripts/train.py --model pubmedbert --dataset biomed_ner
-
-# Gene/protein NER
-python scripts/train.py --model scibert --dataset jnlpba
+for entity in results:
+    status = entity.negation.upper()
+    icd = entity.icd_codes[0]["code"] if entity.icd_codes else "N/A"
+    print(f"{entity.text} [{entity.label}] — {status} — ICD: {icd}")
+    # chest pain [DIAGNOSIS] — NEGATED — ICD: R07.9
+    # type 2 diabetes mellitus [DIAGNOSIS] — AFFIRMED — ICD: E11.9
+    # hypertension [DIAGNOSIS] — AFFIRMED — ICD: I10
 ```
 
-### ICD-10-CM Code Datasets
-
-These datasets provide ICD code mappings for entity linking rather than NER training.
-
-| Key | Source | Description | Records |
-|-----|--------|-------------|---------|
-| `atta00/icd10-codes` | HuggingFace | Full ICD-10-CM hierarchy (used by `ICDCodeLookup`) | 51,438 codes |
-| `icd10_terminology` | awacke1/ICD10-Clinical-Terminology | ICD-10-CM code/description pairs | 72,750 pairs |
-| `icd10_code_description` | wangyichen25/ICD-10-CM_Code-Description_Pairs | Description→code instruction pairs | 1.4M pairs |
-
-**Use ICD codes for entity linking:**
+### ICD-10-CM Code Resolution (Standalone)
 
 ```python
 from src.clinical.icd_codes import ICDCodeLookup
 
-# Loads full 51K codes from atta00/icd10-codes (HuggingFace)
+# Loads full 51K codes from atta00/icd10-codes (HuggingFace, MIT licensed)
 # Falls back to built-in ~45 high-frequency codes if download fails
 lookup = ICDCodeLookup()
 
-# Match a clinical entity to ICD-10-CM codes via TF-IDF similarity
+# Match entity text to ICD-10-CM codes via TF-IDF similarity
 matches = lookup.match_entity("congestive heart failure", top_k=3)
 for m in matches:
-    print(f"  {m.code}: {m.description} (score={m.score:.3f}, type={m.match_type})")
-# Output:
-#   I50.9: Heart failure, unspecified (score=0.782, type=tfidf)
-#   I50.22: Chronic systolic heart failure (score=0.451, type=tfidf)
-#   ...
+    print(f"  {m.code}: {m.description} (score={m.score:.3f})")
+# I50.9: Heart failure, unspecified (score=0.782)
+# I50.22: Chronic systolic heart failure (score=0.451)
 
 # Direct code lookup
 code = lookup.lookup_code("E11.9")
@@ -184,9 +145,9 @@ print(f"{code.code}: {code.description}")
 
 # Batch entity → code mapping
 entities = [
-    {"text": "hypertension", "label": "Disease"},
-    {"text": "pneumonia", "label": "Disease"},
-    {"text": "chest pain", "label": "Symptom"},
+    {"text": "hypertension", "label": "DIAGNOSIS"},
+    {"text": "pneumonia", "label": "DIAGNOSIS"},
+    {"text": "chest pain", "label": "DIAGNOSIS"},
 ]
 results = lookup.match_entities_batch(entities, top_k=3)
 for r in results:
@@ -196,82 +157,9 @@ for r in results:
 # chest pain: ['R07.9']
 ```
 
-### Abbreviation Datasets
+### Negation Detection
 
-These datasets power the abbreviation expansion and disambiguation modules.
-
-| Key | Source | Description | Records |
-|-----|--------|-------------|---------|
-| Meta-Inventory | [Zenodo 10.5281/zenodo.4567594](https://zenodo.org/records/4567594) | 104K medical abbreviations with preferred long forms (CC-BY-4.0) | 104,057 abbreviations / 170,426 senses |
-| `medal` | [McGill-NLP/medal](https://huggingface.co/datasets/McGill-NLP/medal) | 14M PubMed abstracts for abbreviation disambiguation pre-training | 14M abstracts |
-| `casi` | [mitclinicalml/clinical-ie](https://huggingface.co/datasets/mitclinicalml/clinical-ie) | CASI: 18K clinical abbreviation disambiguation examples (41 acronyms) | 18,164 examples |
-| MEDIALpy | [PyPI: medialpy](https://pypi.org/project/medialpy/) | pip-installable medical abbreviation lookup (MIT) | Several thousand |
-
-**Load abbreviations from Meta-Inventory:**
-
-```python
-from src.clinical.shorthand import ShorthandExpander
-
-# Automatically downloads and caches 104K abbreviations from Zenodo
-expander = ShorthandExpander(source="meta_inventory")
-print(f"Loaded {expander.num_abbreviations} abbreviations")
-print(f"Ambiguous: {expander.num_ambiguous}")
-```
-
-**Evaluate disambiguation on CASI:**
-
-```python
-from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
-
-disambiguator = AbbreviationDisambiguator()
-results = disambiguator.evaluate_on_casi(max_examples=1000)
-print(f"Accuracy: {results['accuracy']:.1%}")
-```
-
-### How the ICD Entity Linker Works
-
-The `ICDCodeLookup` follows [SciSpacy's EntityLinker](https://github.com/allenai/scispacy) architecture:
-
-1. **Data source**: Loads the full ICD-10-CM code set (51,438 codes with chapter/section/category hierarchy) from the public [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) dataset (MIT licensed)
-2. **TF-IDF index**: Builds character 3-gram + 4-gram TF-IDF vectors for all code descriptions using `sklearn.feature_extraction.text.TfidfVectorizer(analyzer="char_wb")`
-3. **Matching**: At query time, vectorises the entity text and computes cosine similarity against all code descriptions
-4. **Ranking**: Returns top-k candidates above a minimum similarity threshold
-
-This data-driven approach replaces the previous hardcoded dictionary and automatically covers the full ICD-10-CM taxonomy.
-
-## Python API
-
-### Full Pipeline: Shorthand → NER → Negation → ICD Coding
-
-```python
-from src.clinical.pipeline import MedicalCodingPipeline
-from src.clinical.icd_codes import ICDCodeLookup
-
-# Full pipeline: shorthand expansion → NER → negation detection
-pipeline = MedicalCodingPipeline(
-    model_path="outputs/pubmedbert_ncbi_disease/best_model",
-    expand_shorthand=True,
-    detect_negation=True,
-    negation_strategy="rules",  # or "transformer" for learned assertion
-)
-
-results = pipeline("Pt denies cp. Dx: dm2, htn.")
-
-# Map entities to ICD-10-CM codes
-lookup = ICDCodeLookup()
-for entity in results:
-    codes = lookup.match_entity(entity.text)
-    status = entity.negation.upper()
-    icd = codes[0].code if codes else "N/A"
-    print(f"{entity.text} [{entity.label}] — {status} — ICD: {icd}")
-    # chest pain [Disease] — NEGATED — ICD: R07.9
-    # type 2 diabetes mellitus [Disease] — AFFIRMED — ICD: E11.9
-    # hypertension [Disease] — AFFIRMED — ICD: I10
-```
-
-### Negation Detection: Rules vs Transformer
-
-Two negation/assertion strategies are available:
+Two strategies are available:
 
 **Rule-based (ConText/NegEx) — fast, no GPU needed:**
 
@@ -280,22 +168,20 @@ from src.clinical.negation import NegationDetector
 
 detector = NegationDetector()
 entities = [
-    {"text": "fever", "label": "Symptom", "start": 15, "end": 20},
-    {"text": "cough", "label": "Symptom", "start": 29, "end": 34},
+    {"text": "fever", "label": "DIAGNOSIS", "start": 15, "end": 20},
+    {"text": "cough", "label": "DIAGNOSIS", "start": 29, "end": 34},
 ]
 annotated = detector.annotate_entities("Patient denies fever but has cough", entities)
 # annotated[0]["negation"] == "negated"   (fever)
 # annotated[1]["negation"] == "affirmed"  (cough)
 ```
 
-**Transformer-based (bvanaken/clinical-assertion-negation-bert) — learned, more accurate:**
+**Transformer-based (bvanaken/clinical-assertion-negation-bert) — learned:**
 
 ```python
 from src.clinical.assertion import AssertionClassifier
 
 classifier = AssertionClassifier()
-
-# Single entity prediction
 result = classifier.predict(
     text="Patient denies any chest pain or shortness of breath.",
     entity_text="chest pain",
@@ -303,185 +189,145 @@ result = classifier.predict(
     entity_end=29,
 )
 # result == {'label': 'ABSENT', 'negation': 'negated', 'score': 0.97}
-
-# Batch annotation
-entities = [
-    {"text": "chest pain", "start": 19, "end": 29},
-    {"text": "shortness of breath", "start": 33, "end": 52},
-]
-annotated = classifier.annotate_entities(
-    "Patient denies any chest pain or shortness of breath.",
-    entities,
-)
-# Each entity gets: negation, assertion_label, assertion_score
 ```
 
-**Use transformer negation in the pipeline:**
-
-```python
-from src.clinical.pipeline import MedicalCodingPipeline
-
-pipeline = MedicalCodingPipeline(
-    model_path="outputs/best_model",
-    negation_strategy="transformer",  # uses bvanaken model
-)
-# The pipeline will automatically use the transformer classifier
-# instead of rule-based NegEx for assertion detection
-```
-
-### Shorthand Expansion: Data-Driven Sources
-
-The `ShorthandExpander` loads abbreviations from public datasets in priority order:
+### Shorthand Expansion
 
 ```python
 from src.clinical.shorthand import ShorthandExpander
 
-# Default: tries Meta-Inventory from Zenodo, falls back to built-in
-expander = ShorthandExpander()  # source="auto"
+expander = ShorthandExpander()  # loads 104K abbreviations from Meta-Inventory
 
-# Explicit source selection
-expander = ShorthandExpander(source="builtin")          # ~280 hand-curated only
-expander = ShorthandExpander(source="meta_inventory")   # 104K from Zenodo
-expander = ShorthandExpander(source="path/to/abbrs.csv") # custom CSV
-
-# Basic expansion
 text = expander.expand("pt c/o sob, htn well controlled on meds")
 # "patient complaining of shortness of breath, hypertension well controlled on meds"
 
-# Expansion with offset tracking (for NER alignment)
+# With offset tracking for NER alignment
 expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
-# offsets tracks original→expanded character positions for each abbreviation
-
-# Identify abbreviations without expanding
-found = expander.identify_abbreviations("pt c/o sob and cp")
-# [{'abbreviation': 'pt', 'expansion': 'patient', 'start': 0, 'end': 2}, ...]
-
-# Check available senses for ambiguous abbreviations
-senses = expander.get_senses("pt")
-# ['Patient', 'Prothrombin Time'] (when Meta-Inventory loaded)
-
-print(f"Total abbreviations: {expander.num_abbreviations}")
-print(f"Ambiguous (multi-sense): {expander.num_ambiguous}")
 ```
 
-### Abbreviation Disambiguation
+## Available Datasets
 
-Three strategies for resolving ambiguous abbreviations (e.g., "PT" = patient vs prothrombin time):
+### NER Training Datasets
 
-**Preferred Long Form (default, fast):**
+| Key | Source | Entity Types | Size |
+|-----|--------|-------------|------|
+| **`icd_ner`** | **NCBI Disease + BC5CDR (composite)** | **DIAGNOSIS** | **~8.4K sentences** |
+| `ncbi_disease` | NCBI Disease Corpus | Disease | 6.9K sentences |
+| `bc5cdr` | BioCreative V CDR | Chemical, Disease | 1.5K abstracts |
+| `bc2gm` | BioCreative II GM | Gene | 20K sentences |
+| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | 22K sentences |
+| `biomedical_ner_all` | d4data combined | 10+ entity types | 25K+ samples |
+| `biomed_ner` | knowledgator/biomed_NER | 24 types (DISORDER, CLINICAL_DRUG, ...) | Span-annotated |
 
-```python
-# Uses the Preferred Long Form (PLF) from Meta-Inventory
-expander = ShorthandExpander(disambiguation="preferred")
-```
+**`icd_ner`** is the recommended dataset for ICD coding. It merges two well-established disease corpora and normalizes all disease/disorder entities to a single `DIAGNOSIS` label. The model's job is to detect diagnosable conditions; the downstream `ICDCodeLookup` maps extracted text spans to specific ICD-10-CM codes.
 
-**Rule-based context matching (legacy):**
+### ICD-10-CM Code Lookup Datasets
 
-```python
-# Uses hand-crafted regex patterns for context-sensitive resolution
-expander = ShorthandExpander(disambiguation="context_rules")
-expander.expand("check pt")       # "check prothrombin time" (lab context)
-expander.expand("the pt reports")  # "the patient reports" (general context)
-```
+| Key | Source | Records |
+|-----|--------|---------|
+| `atta00/icd10-codes` | Full ICD-10-CM hierarchy (used by `ICDCodeLookup`) | 51,438 codes |
+| `icd10_terminology` | awacke1/ICD10-Clinical-Terminology | 72,750 pairs |
+| `icd10_code_description` | wangyichen25/ICD-10-CM_Code-Description_Pairs | 1.4M pairs |
 
-**MeDAL ELECTRA transformer (learned, most accurate):**
+### Why No OASIS Dataset?
 
-```python
-from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
-
-# Use MeDAL ELECTRA model for contextual disambiguation
-expander = ShorthandExpander(disambiguation="transformer")
-
-# Or use the disambiguator directly
-disambiguator = AbbreviationDisambiguator()
-best_sense = disambiguator.disambiguate(
-    text="Patient presents with SOB and fatigue.",
-    abbreviation="SOB",
-    abbr_start=21, abbr_end=24,
-    senses=["shortness of breath", "side of bed"],
-)
-# "shortness of breath" (contextually correct)
-
-# Evaluate on CASI benchmark
-results = disambiguator.evaluate_on_casi()
-# {'accuracy': 0.85, 'correct': 15439, 'total': 18164, ...}
-```
-
-### Span-to-BIO Conversion
-
-```python
-from src.data.dataset_loader import spans_to_bio
-
-text = "Patient has congestive heart failure and diabetes."
-entities = [
-    {"start": 12, "end": 36, "class": "DISORDER"},
-    {"start": 41, "end": 49, "class": "DISORDER"},
-]
-tokens, labels = spans_to_bio(text, entities)
-# tokens: ['Patient', 'has', 'congestive', 'heart', 'failure', 'and', 'diabetes.']
-# labels: ['O', 'O', 'B-DISORDER', 'I-DISORDER', 'I-DISORDER', 'O', 'B-DISORDER']
-```
+CMS publishes aggregate OASIS (Outcome and Assessment Information Set) statistics, but the underlying clinical text with span-level ICD annotations is not publicly released. The `icd_ner` composite dataset fills this gap using the best publicly available disease NER corpora.
 
 ## Supported Models
 
-| Key | Model | Description |
-|-----|-------|-------------|
-| `pubmedbert` | `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext` | SOTA on BLURB benchmark |
-| `biobert` | `dmis-lab/biobert-v1.1` | Pre-trained on PubMed abstracts |
-| `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | Pre-trained on MIMIC-III clinical notes |
-| `scibert` | `allenai/scibert_scivocab_uncased` | Pre-trained on scientific papers |
-| `gatortron-base` | `UFNLP/gatortron-base` | Pre-trained on 90B words of clinical text |
+| Key | Model | Best For |
+|-----|-------|----------|
+| `pubmedbert` | `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext` | General biomedical NER (SOTA on BLURB) |
+| `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | Clinical notes (pre-trained on MIMIC-III) |
+| `biobert` | `dmis-lab/biobert-v1.1` | PubMed literature |
+| `scibert` | `allenai/scibert_scivocab_uncased` | Scientific papers |
+| `gatortron-base` | `UFNLP/gatortron-base` | Clinical text (90B words) |
 
-## Architecture Decisions
+For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are recommended starting points.
 
-### Why TF-IDF for Entity Linking (Following SciSpacy)?
+## Project Structure
 
-SciSpacy's EntityLinker uses TF-IDF character n-grams rather than dense neural embeddings for linking entities to UMLS/ICD codes. This approach:
+```
+Medical_Code_Intelligence/
+├── configs/
+│   └── ner_config.py              # Model, dataset, and training configs
+├── src/
+│   ├── clinical/
+│   │   ├── pipeline.py            # Unified pipeline: NER → negation → ICD
+│   │   ├── icd_codes.py           # TF-IDF ICD-10-CM entity linker (51K codes)
+│   │   ├── negation.py            # ConText/NegEx rule-based negation
+│   │   ├── assertion.py           # Transformer assertion classifier
+│   │   ├── shorthand.py           # Data-driven abbreviation expansion
+│   │   ├── abbreviation_disambiguator.py  # MeDAL ELECTRA disambiguation
+│   │   ├── _icd_fallback.py       # Offline fallback ICD codes
+│   │   └── _shorthand_fallback.py # Built-in ~280 abbreviations
+│   ├── data/
+│   │   ├── icd_dataset.py         # ICD NER composite dataset loader
+│   │   ├── dataset_loader.py      # HuggingFace dataset loaders + span→BIO
+│   │   ├── preprocessing.py       # Subword tokenization & label alignment
+│   │   └── data_utils.py          # Data collator, sliding window splitting
+│   ├── models/
+│   │   ├── ner_model.py           # AutoModelForTokenClassification builder
+│   │   └── crf_model.py           # Optional CRF layer
+│   ├── training/
+│   │   ├── trainer.py             # HuggingFace Trainer setup
+│   │   └── callbacks.py           # Early stopping
+│   ├── evaluation/
+│   │   ├── metrics.py             # Entity-level F1 (seqeval)
+│   │   └── error_analysis.py      # Boundary/type/FP/FN analysis
+│   └── inference/
+│       └── predictor.py           # Inference with batching
+├── scripts/
+│   ├── train.py                   # Training CLI
+│   ├── evaluate.py                # Evaluation CLI
+│   ├── predict.py                 # Prediction CLI (interactive + batch)
+│   └── benchmark.py               # Multi-model x multi-dataset benchmarking
+├── tests/                         # Test suite
+├── requirements.txt
+└── setup.py
+```
 
-- **Captures morphological patterns** in medical terminology (e.g. "-itis", "-emia", "cardio-") that are critical for matching
-- **Scales efficiently** to 50K+ codes without GPU
-- **Is deterministic and interpretable** — you can inspect which n-grams drive a match
-- **Outperforms word-level TF-IDF** for medical terms where character patterns are highly informative
+## How the ICD Entity Linker Works
 
-### Why Separate Assertion Detection (Not Embedded in NER)?
+The `ICDCodeLookup` follows [SciSpacy's EntityLinker](https://github.com/allenai/scispacy) architecture:
 
-Modern clinical NLP consensus (reflected in MedSpacy, cTAKES, and SciSpacy) favors a **pipeline approach**: extract entities first (NER), then classify their assertion status (negation/possibility/historicity) separately. This:
+1. **Data source**: Loads 51,438 ICD-10-CM codes from [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) (MIT licensed)
+2. **TF-IDF index**: Builds character 3/4-gram TF-IDF vectors for all code descriptions
+3. **Matching**: Cosine similarity between entity text and code descriptions
+4. **Ranking**: Top-k candidates above a minimum similarity threshold
 
-- Allows swapping negation strategies (rule-based for speed, transformer for accuracy) without retraining the NER model
-- Matches the clinical workflow where entities are identified first, then contextualised
-- Enables using the same NER model across different assertion needs
-
-### Public Data Sources
-
-| Component | Dataset | License | Records |
-|-----------|---------|---------|---------|
-| ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
-| Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
-| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 abbreviations |
-| Disambiguation model | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | Pre-trained on 14M abstracts |
-| Disambiguation eval | [mitclinicalml/clinical-ie](https://huggingface.co/datasets/mitclinicalml/clinical-ie) (CASI) | MIT | 18,164 examples |
-| Biomedical NER | [knowledgator/biomed_NER](https://huggingface.co/datasets/knowledgator/biomed_NER) | Apache 2.0 | 24 entity types |
-| Disease NER | [ncbi_disease](https://huggingface.co/datasets/ncbi_disease) | CC BY 4.0 | 6.9K sentences |
-| Drug+Disease NER | [bc5cdr](https://huggingface.co/datasets/bigbio/bc5cdr) | Public domain | 1.5K abstracts |
+Character n-grams capture morphological patterns critical for medical terms (e.g. "-itis", "-emia", "cardio-"). No GPU required.
 
 ## Training Best Practices
 
-This system implements the following SOTA practices:
-
-- **Subword label alignment** — BIO labels aligned to first subword token; continuation subwords receive ignore label (-100)
-- **Dynamic padding** — Pad to longest-in-batch rather than max_length for efficiency
+- **Subword label alignment** — BIO labels aligned to first subword; continuations get ignore label (-100)
+- **Dynamic padding** — Pad to longest-in-batch for efficiency
 - **Learning rate warmup** — Linear warmup over 10% of training steps
-- **Linear LR decay** — After warmup, decay to zero
-- **Mixed precision (FP16)** — When GPU available, for 2x training speed
-- **Gradient accumulation** — Configurable for effective larger batch sizes
+- **Mixed precision (FP16)** — 2x training speed on GPU
 - **Early stopping** — Patience-based on validation entity-level F1
-- **Weight decay** — AdamW with 0.01 weight decay (no decay on bias/LayerNorm)
 - **Gradient clipping** — Max norm 1.0
+- **Model saving** — Best model saved automatically based on validation F1
+
+## Architecture Decisions
+
+**Pipeline approach (NER → Assertion → ICD)**: Entities are extracted first, then negation is classified separately. This allows swapping negation strategies without retraining NER, matching the architecture of MedSpacy, cTAKES, and SciSpacy.
+
+**TF-IDF for entity linking**: Character n-grams outperform word-level TF-IDF for medical terms. Scales to 50K+ codes without GPU. Deterministic and interpretable.
+
+**Composite ICD NER dataset**: Merging NCBI Disease + BC5CDR gives broader disease coverage than either alone. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
+
+## Public Data Sources
+
+| Component | Dataset | License | Records |
+|-----------|---------|---------|---------|
+| ICD NER training | NCBI Disease + BC5CDR (composite) | CC BY 4.0 / Public domain | ~8.4K sentences |
+| ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
+| Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
+| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
+| Disambiguation | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | 14M abstracts |
 
 ## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
-
-211 tests covering ICD TF-IDF entity linking, assertion classification, abbreviation disambiguation, data-driven shorthand expansion, Meta-Inventory parsing, negation detection, pipeline integration, span-to-BIO conversion, tokenization alignment, and clinical scenario end-to-end flows.

@@ -95,7 +95,7 @@ def main():
     trainer = Trainer(
         model=model,
         args=eval_args,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=build_compute_metrics_fn(label_list),
     )

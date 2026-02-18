@@ -33,6 +33,7 @@ class MedicalEntity:
     negation_trigger: Optional[str] = None
     original_text: Optional[str] = None  # before shorthand expansion
     expanded_from: Optional[str] = None  # abbreviation that was expanded
+    icd_codes: Optional[List[Dict]] = None  # ICD-10-CM matches
 
     def to_dict(self) -> Dict:
         d = {
@@ -48,6 +49,8 @@ class MedicalEntity:
         if self.expanded_from:
             d["expanded_from"] = self.expanded_from
             d["original_text"] = self.original_text
+        if self.icd_codes:
+            d["icd_codes"] = self.icd_codes
         return d
 
     @property
@@ -88,6 +91,10 @@ class MedicalCodingPipeline:
         Whether to run negation/context detection on extracted entities.
     negation_strategy : str
         "rules" for ConText/NegEx, "transformer" for learned assertion model.
+    resolve_icd_codes : bool
+        Whether to resolve entities to ICD-10-CM codes via TF-IDF matching.
+    icd_top_k : int
+        Number of ICD candidate codes to return per entity.
     device : str, optional
         Torch device. Auto-detected if None.
     custom_abbreviations : dict, optional
@@ -102,6 +109,8 @@ class MedicalCodingPipeline:
         expand_shorthand: bool = True,
         detect_negation: bool = True,
         negation_strategy: str = "rules",
+        resolve_icd_codes: bool = False,
+        icd_top_k: int = 3,
         device: Optional[str] = None,
         custom_abbreviations: Optional[Dict[str, str]] = None,
         negation_scope_window: int = 6,
@@ -131,6 +140,13 @@ class MedicalCodingPipeline:
         else:
             self.negation_detector = None
             self.assertion_classifier = None
+
+        # ICD-10-CM code resolution
+        self.icd_lookup = None
+        self._icd_top_k = icd_top_k
+        if resolve_icd_codes:
+            from src.clinical.icd_codes import ICDCodeLookup
+            self.icd_lookup = ICDCodeLookup()
 
         # NER predictor (lazy-loaded if model_path given)
         self._predictor = None
@@ -231,6 +247,14 @@ class MedicalCodingPipeline:
                 expanded_from=expanded_from,
             ))
 
+        # Step 5: ICD-10-CM code resolution
+        if self.icd_lookup is not None:
+            for entity in results:
+                matches = self.icd_lookup.match_entity(
+                    entity.text, top_k=self._icd_top_k,
+                )
+                entity.icd_codes = [m.to_dict() for m in matches]
+
         return results
 
     def process_with_entities(
@@ -315,6 +339,9 @@ class MedicalCodingPipeline:
                 parts.append(f'trigger="{ent.negation_trigger}"')
             if ent.expanded_from:
                 parts.append(f'from="{ent.expanded_from}"')
+            if ent.icd_codes:
+                top = ent.icd_codes[0]
+                parts.append(f'ICD={top["code"]}')
             parts.append(f"score={ent.score:.3f}")
             annotation = ", ".join(parts)
             lines.append(f"  [{ent.text}]({annotation})")
