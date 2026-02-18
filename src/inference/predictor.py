@@ -74,6 +74,12 @@ class NERPredictor:
         self.device = device
         self.aggregation_strategy = aggregation_strategy
 
+        # Resolve relative local paths so transformers doesn't treat them as
+        # HuggingFace repo IDs (e.g. "outputs/best_model" → "/abs/outputs/best_model")
+        import os
+        if os.path.isdir(model_path):
+            model_path = os.path.abspath(model_path)
+
         logger.info("Loading NER model from '%s' on device '%s'...", model_path, device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
         self.model = AutoModelForTokenClassification.from_pretrained(model_path)
