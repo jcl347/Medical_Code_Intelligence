@@ -1,5 +1,8 @@
 """
-Tests for physician shorthand / abbreviation expansion.
+Tests for data-driven physician shorthand / abbreviation expansion.
+
+Tests use source="builtin" to ensure deterministic behavior in CI
+(no Zenodo download required).
 """
 
 import sys
@@ -13,8 +16,13 @@ from src.clinical.shorthand import ShorthandExpander
 
 @pytest.fixture
 def expander():
-    return ShorthandExpander()
+    """Create expander with built-in abbreviations (no download)."""
+    return ShorthandExpander(source="builtin")
 
+
+# ---------------------------------------------------------------------------
+# Basic expansion (backward-compatible with previous tests)
+# ---------------------------------------------------------------------------
 
 class TestBasicExpansion:
     """Test that common abbreviations expand correctly."""
@@ -83,12 +91,10 @@ class TestWordBoundaries:
     """Abbreviations should only match as whole words."""
 
     def test_not_in_middle_of_word(self, expander):
-        # "treatment" contains "tx" but should not be expanded
         result = expander.expand("treatment plan")
         assert result == "treatment plan"
 
     def test_not_partial_match(self, expander):
-        # "caution" starts with "ca" but should not be expanded
         result = expander.expand("caution advised")
         assert "calcium" not in result
 
@@ -128,12 +134,12 @@ class TestCustomAbbreviations:
 
     def test_custom_added(self):
         custom = {"myabbr": "my custom expansion"}
-        exp = ShorthandExpander(custom_abbreviations=custom)
+        exp = ShorthandExpander(source="builtin", custom_abbreviations=custom)
         assert "my custom expansion" in exp.expand("check myabbr")
 
     def test_custom_override(self):
         custom = {"htn": "HIGH BLOOD PRESSURE"}
-        exp = ShorthandExpander(custom_abbreviations=custom)
+        exp = ShorthandExpander(source="builtin", custom_abbreviations=custom)
         assert "HIGH BLOOD PRESSURE" in exp.expand("dx: htn")
 
 
@@ -156,3 +162,136 @@ class TestEdgeCases:
         assert "hypertension" in result
         assert "type 2 diabetes mellitus" in result
         assert "coronary artery disease" in result
+
+
+# ---------------------------------------------------------------------------
+# Data-driven source tests
+# ---------------------------------------------------------------------------
+
+class TestDataDrivenSources:
+    """Test the data-driven loading mechanism."""
+
+    def test_builtin_source_loads(self):
+        exp = ShorthandExpander(source="builtin")
+        assert exp.num_abbreviations >= 200
+        assert "htn" in exp.abbreviations
+        assert "dm2" in exp.abbreviations
+
+    def test_auto_source_falls_back_gracefully(self):
+        """In CI (no Zenodo access), auto should fall back to built-in."""
+        exp = ShorthandExpander(source="auto")
+        # Should still have at least the built-in abbreviations
+        assert exp.num_abbreviations >= 200
+        assert "hypertension" in exp.expand("htn")
+
+    def test_disambiguation_preferred_is_default(self):
+        exp = ShorthandExpander(source="builtin")
+        assert exp._disambiguation == "preferred"
+
+    def test_disambiguation_context_rules(self):
+        exp = ShorthandExpander(source="builtin", disambiguation="context_rules")
+        assert exp._disambiguation == "context_rules"
+        # "pt" after lab context should expand to "prothrombin time"
+        result = exp.expand("check pt")
+        assert result == "check prothrombin time"
+
+    def test_disambiguation_context_rules_patient(self):
+        exp = ShorthandExpander(source="builtin", disambiguation="context_rules")
+        # "pt" in general context should expand to "patient"
+        result = exp.expand("the pt reports")
+        assert "patient" in result
+
+    def test_num_abbreviations_property(self):
+        exp = ShorthandExpander(source="builtin")
+        assert exp.num_abbreviations == len(exp.abbreviations)
+
+    def test_get_senses_empty_for_builtin(self):
+        """Built-in source has no sense inventory (not ambiguous)."""
+        exp = ShorthandExpander(source="builtin")
+        assert exp.get_senses("htn") == []
+        assert exp.num_ambiguous == 0
+
+    def test_identify_abbreviations_basic(self):
+        exp = ShorthandExpander(source="builtin")
+        found = exp.identify_abbreviations("pt with htn and dm2")
+        abbrs = {f["abbreviation"].lower() for f in found}
+        assert "htn" in abbrs
+        assert "dm2" in abbrs
+
+    def test_expand_in_place_false(self):
+        exp = ShorthandExpander(source="builtin", expand_in_place=False)
+        text = "pt with htn"
+        assert exp.expand(text) == text  # no expansion
+
+
+# ---------------------------------------------------------------------------
+# Meta-Inventory integration (mocked)
+# ---------------------------------------------------------------------------
+
+class TestMetaInventoryParsing:
+    """Test Meta-Inventory CSV parsing with mock data."""
+
+    def test_parse_meta_inventory_csv(self, tmp_path):
+        """Test parsing a CSV file with Meta-Inventory format."""
+        from src.clinical.shorthand import _parse_meta_inventory
+
+        csv_content = "SF,LF,PLF\nhtn,Hypertension,Hypertension\npt,Patient,Patient\npt,Prothrombin Time,Patient\nsob,Shortness of Breath,Shortness of Breath\n"
+        csv_path = tmp_path / "test_meta.csv"
+        csv_path.write_text(csv_content)
+
+        abbreviations, sense_inventory = _parse_meta_inventory(str(csv_path))
+
+        assert "htn" in abbreviations
+        assert abbreviations["htn"].lower() == "hypertension"
+        assert "sob" in abbreviations
+        assert "pt" in abbreviations
+        # "pt" is ambiguous — should have multiple senses
+        assert "pt" in sense_inventory
+        assert len(sense_inventory["pt"]) == 2
+
+    def test_parse_filters_short_abbreviations(self, tmp_path):
+        from src.clinical.shorthand import _parse_meta_inventory
+
+        csv_content = "SF,LF,PLF\na,Alanine,Alanine\nhtn,Hypertension,Hypertension\n"
+        csv_path = tmp_path / "test_short.csv"
+        csv_path.write_text(csv_content)
+
+        abbreviations, _ = _parse_meta_inventory(str(csv_path), min_length=2)
+        assert "a" not in abbreviations
+        assert "htn" in abbreviations
+
+    def test_parse_filters_english_stopwords(self, tmp_path):
+        from src.clinical.shorthand import _parse_meta_inventory
+
+        csv_content = "SF,LF,PLF\nor,Operating Room,Operating Room\nhtn,Hypertension,Hypertension\n"
+        csv_path = tmp_path / "test_stopwords.csv"
+        csv_path.write_text(csv_content)
+
+        abbreviations, _ = _parse_meta_inventory(str(csv_path))
+        assert "or" not in abbreviations
+        assert "htn" in abbreviations
+
+    def test_builtin_overrides_meta_inventory(self, tmp_path):
+        """Built-in abbreviations should override Meta-Inventory values."""
+        from src.clinical.shorthand import _parse_meta_inventory
+
+        # Create a Meta-Inventory with a different expansion for "htn"
+        csv_content = "SF,LF,PLF\nhtn,High Blood Pressure,High Blood Pressure\n"
+        csv_path = tmp_path / "test_override.csv"
+        csv_path.write_text(csv_content)
+
+        # Load with the CSV as source
+        exp = ShorthandExpander(source=str(csv_path))
+        # Built-in "htn" -> "hypertension" should override Meta-Inventory
+        assert exp.abbreviations["htn"] == "hypertension"
+
+    def test_meta_inventory_fills_gaps(self, tmp_path):
+        """Meta-Inventory should provide abbreviations not in built-in."""
+        csv_content = "SF,LF,PLF\nxyzmed,Experimental Medicine,Experimental Medicine\nhtn,Hypertension,Hypertension\n"
+        csv_path = tmp_path / "test_gaps.csv"
+        csv_path.write_text(csv_content)
+
+        exp = ShorthandExpander(source=str(csv_path))
+        # "xyzmed" only exists in Meta-Inventory
+        assert "xyzmed" in exp.abbreviations
+        assert exp.abbreviations["xyzmed"] == "Experimental Medicine"

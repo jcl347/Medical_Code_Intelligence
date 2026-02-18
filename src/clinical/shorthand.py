@@ -1,379 +1,408 @@
 """
-Physician shorthand and medical abbreviation expansion.
+Data-driven physician shorthand and medical abbreviation expansion.
 
-Clinical notes are full of abbreviations that hurt NER performance.
-This module normalises them before passing text through the model,
-while preserving character offsets so entity positions remain valid.
+Loads abbreviations from three public sources (tried in order):
+1. Medical Abbreviation Meta-Inventory (104K abbreviations, CC-BY-4.0)
+   - Source: Zenodo 10.5281/zenodo.4567594
+   - Paper: Nature Scientific Data, 2021
+2. MEDIALpy package (MIT, pip-installable)
+   - Source: github.com/imantsm/medical_abbreviations
+3. Built-in fallback (~280 hand-curated clinical abbreviations)
+   - From Stedman's, JCAHO "Do Not Use" list, common EHR patterns
 
-Sources for abbreviation lists:
-- Stedman's Medical Abbreviations
-- JCAHO "Do Not Use" list
-- Common EHR/clinical documentation patterns
+For ambiguous abbreviations (23% of Meta-Inventory have multiple senses),
+two disambiguation strategies are supported:
+- "preferred": Use the Preferred Long Form (PLF) from Meta-Inventory (fast)
+- "transformer": Use MeDAL ELECTRA model for contextual disambiguation
+- "context_rules": Use hand-crafted regex rules (legacy, fast)
+
+Character offsets are preserved through expansion for NER alignment.
 """
 
+import csv
+import io
+import json
 import logging
+import os
 import re
+import urllib.request
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Comprehensive physician shorthand dictionary
-# Organised by clinical category for maintainability
+# Meta-Inventory download configuration
 # ---------------------------------------------------------------------------
+ZENODO_RECORD_ID = "4567594"
+ZENODO_API_URL = f"https://zenodo.org/api/records/{ZENODO_RECORD_ID}"
+DEFAULT_CACHE_DIR = os.path.join(
+    os.path.expanduser("~"), ".cache", "medical_code_intelligence",
+)
 
-# --- General clinical abbreviations ---
-_GENERAL = {
-    "pt": "patient",
-    "pts": "patients",
-    "px": "physical examination",
-    "hx": "history",
-    "pmh": "past medical history",
-    "pmhx": "past medical history",
-    "fhx": "family history",
-    "shx": "social history",
-    "h/o": "history of",
-    "s/p": "status post",
-    "c/o": "complaining of",
-    "r/o": "rule out",
-    "f/u": "follow up",
-    "w/u": "workup",
-    "y/o": "year old",
-    "yo": "year old",
-    "m/f": "male/female",
-    "wt": "weight",
-    "ht": "height",
-    "bmi": "body mass index",
-    "cc": "chief complaint",
-    "ros": "review of systems",
-    "hpi": "history of present illness",
-    "dob": "date of birth",
-    "a&o": "alert and oriented",
-    "a/o": "alert and oriented",
-    "wdwn": "well developed well nourished",
-    "wd/wn": "well developed well nourished",
-    "nad": "no acute distress",
-    "nka": "no known allergies",
-    "nkda": "no known drug allergies",
-    "nkma": "no known medication allergies",
-    "adl": "activities of daily living",
-    "adls": "activities of daily living",
-    "dme": "durable medical equipment",
-    "snf": "skilled nursing facility",
-}
-
-# --- Diagnoses / conditions ---
-_DIAGNOSES = {
-    "dm": "diabetes mellitus",
-    "dm1": "type 1 diabetes mellitus",
-    "dm2": "type 2 diabetes mellitus",
-    "t1dm": "type 1 diabetes mellitus",
-    "t2dm": "type 2 diabetes mellitus",
-    "iddm": "insulin dependent diabetes mellitus",
-    "niddm": "non-insulin dependent diabetes mellitus",
-    "htn": "hypertension",
-    "chf": "congestive heart failure",
-    "cad": "coronary artery disease",
-    "mi": "myocardial infarction",
-    "ami": "acute myocardial infarction",
-    "stemi": "st elevation myocardial infarction",
-    "nstemi": "non-st elevation myocardial infarction",
-    "afib": "atrial fibrillation",
-    "a-fib": "atrial fibrillation",
-    "aflutter": "atrial flutter",
-    "svt": "supraventricular tachycardia",
-    "vtach": "ventricular tachycardia",
-    "vfib": "ventricular fibrillation",
-    "dvt": "deep vein thrombosis",
-    "pe": "pulmonary embolism",
-    "copd": "chronic obstructive pulmonary disease",
-    "sob": "shortness of breath",
-    "doe": "dyspnea on exertion",
-    "pna": "pneumonia",
-    "uti": "urinary tract infection",
-    "uri": "upper respiratory infection",
-    "gerd": "gastroesophageal reflux disease",
-    "ibs": "irritable bowel syndrome",
-    "ibd": "inflammatory bowel disease",
-    "uc": "ulcerative colitis",
-    "gi": "gastrointestinal",
-    "gib": "gastrointestinal bleed",
-    "ugib": "upper gastrointestinal bleed",
-    "lgib": "lower gastrointestinal bleed",
-    "cva": "cerebrovascular accident",
-    "tia": "transient ischemic attack",
-    "ckd": "chronic kidney disease",
-    "esrd": "end stage renal disease",
-    "aki": "acute kidney injury",
-    "arf": "acute renal failure",
-    "crf": "chronic renal failure",
-    "bph": "benign prostatic hyperplasia",
-    "osa": "obstructive sleep apnea",
-    "ra": "rheumatoid arthritis",
-    "oa": "osteoarthritis",
-    "sle": "systemic lupus erythematosus",
-    "ms": "multiple sclerosis",
-    "als": "amyotrophic lateral sclerosis",
-    "pvd": "peripheral vascular disease",
-    "pad": "peripheral arterial disease",
-    "hld": "hyperlipidemia",
-    "hl": "hyperlipidemia",
-    "acs": "acute coronary syndrome",
-    "aaa": "abdominal aortic aneurysm",
-    "ards": "acute respiratory distress syndrome",
-    "dic": "disseminated intravascular coagulation",
-    "sbo": "small bowel obstruction",
-    "lbo": "large bowel obstruction",
-    "etoh": "alcohol",
-    "sz": "seizure",
-    "ha": "headache",
-    "cp": "chest pain",
-    "lbp": "low back pain",
-    "n/v": "nausea/vomiting",
-    "n/v/d": "nausea/vomiting/diarrhea",
-    "bka": "below knee amputation",
-    "aka": "above knee amputation",
-}
-
-# --- Treatment / procedures ---
-_TREATMENT = {
-    "tx": "treatment",
-    "rx": "prescription",
-    "dx": "diagnosis",
-    "ddx": "differential diagnosis",
-    "sx": "surgery",
-    "surg": "surgery",
-    "op": "operation",
-    "pre-op": "preoperative",
-    "post-op": "postoperative",
-    "abx": "antibiotics",
-    "ppx": "prophylaxis",
-    "dc": "discontinue",
-    "d/c": "discharge",
-    "dispo": "disposition",
-    "cpap": "continuous positive airway pressure",
-    "bipap": "bilevel positive airway pressure",
-    "ngt": "nasogastric tube",
-    "foley": "foley catheter",
-    "iv": "intravenous",
-    "im": "intramuscular",
-    "sq": "subcutaneous",
-    "subq": "subcutaneous",
-    "po": "by mouth",
-    "pr": "per rectum",
-    "sl": "sublingual",
-    "prn": "as needed",
-    "qd": "daily",
-    "bid": "twice daily",
-    "tid": "three times daily",
-    "qid": "four times daily",
-    "qhs": "at bedtime",
-    "qam": "every morning",
-    "qpm": "every evening",
-    "qod": "every other day",
-    "qwk": "every week",
-    "ac": "before meals",
-    "pc": "after meals",
-    "stat": "immediately",
-    "ekg": "electrocardiogram",
-    "ecg": "electrocardiogram",
-    "echo": "echocardiogram",
-    "cbc": "complete blood count",
-    "bmp": "basic metabolic panel",
-    "cmp": "comprehensive metabolic panel",
-    "lfts": "liver function tests",
-    "tsh": "thyroid stimulating hormone",
-    "ua": "urinalysis",
-    "ct": "computed tomography",
-    "mri": "magnetic resonance imaging",
-    "cxr": "chest x-ray",
-    "kub": "kidneys ureters bladder x-ray",
-    "us": "ultrasound",
-    "cabg": "coronary artery bypass graft",
-    "ptca": "percutaneous transluminal coronary angioplasty",
-    "pci": "percutaneous coronary intervention",
-    "ercp": "endoscopic retrograde cholangiopancreatography",
-    "egd": "esophagogastroduodenoscopy",
-    "lap": "laparoscopic",
-    "lap chole": "laparoscopic cholecystectomy",
-    "appy": "appendectomy",
-    "cath": "catheterisation",
-    "trach": "tracheostomy",
-    "intub": "intubation",
-    "extub": "extubation",
-}
-
-# --- Anatomy / physical exam ---
-_ANATOMY = {
-    "abd": "abdomen",
-    "ext": "extremities",
-    "bilat": "bilateral",
-    "le": "lower extremity",
-    "ue": "upper extremity",
-    "lle": "left lower extremity",
-    "rle": "right lower extremity",
-    "lue": "left upper extremity",
-    "rue": "right upper extremity",
-    "ruq": "right upper quadrant",
-    "luq": "left upper quadrant",
-    "rlq": "right lower quadrant",
-    "llq": "left lower quadrant",
-    "cv": "cardiovascular",
-    "pulm": "pulmonary",
-    "neuro": "neurological",
-    "msk": "musculoskeletal",
-    "heent": "head eyes ears nose throat",
-    "eomi": "extraocular movements intact",
-    "perrl": "pupils equal round reactive to light",
-    "perrla": "pupils equal round reactive to light and accommodation",
-    "rrr": "regular rate and rhythm",
-    "ctab": "clear to auscultation bilaterally",
-    "cta": "clear to auscultation",
-    "ntnd": "nontender nondistended",
-    "nt/nd": "nontender nondistended",
-    "bs": "bowel sounds",
-    "nabs": "normoactive bowel sounds",
-    "tms": "tympanic membranes",
-    "tm": "tympanic membrane",
-    "cn": "cranial nerves",
-    "dtr": "deep tendon reflexes",
-    "dtrs": "deep tendon reflexes",
-    "rom": "range of motion",
-}
-
-# --- Lab values / vitals ---
-_LABS = {
-    "hr": "heart rate",
-    "bp": "blood pressure",
-    "sbp": "systolic blood pressure",
-    "dbp": "diastolic blood pressure",
-    "rr": "respiratory rate",
-    "o2 sat": "oxygen saturation",
-    "spo2": "oxygen saturation",
-    "temp": "temperature",
-    "t": "temperature",
-    "wbc": "white blood cell count",
-    "hgb": "hemoglobin",
-    "hct": "hematocrit",
-    "plt": "platelet count",
-    "plts": "platelets",
-    "cr": "creatinine",
-    "bun": "blood urea nitrogen",
-    "na": "sodium",
-    "k": "potassium",
-    "cl": "chloride",
-    "hco3": "bicarbonate",
-    "co2": "carbon dioxide",
-    "ca": "calcium",
-    "mg": "magnesium",
-    "phos": "phosphorus",
-    "ast": "aspartate aminotransferase",
-    "alt": "alanine aminotransferase",
-    "alp": "alkaline phosphatase",
-    "tbili": "total bilirubin",
-    "dbili": "direct bilirubin",
-    "alb": "albumin",
-    "tp": "total protein",
-    "pt": "prothrombin time",
-    "inr": "international normalized ratio",
-    "ptt": "partial thromboplastin time",
-    "aptt": "activated partial thromboplastin time",
-    "esr": "erythrocyte sedimentation rate",
-    "crp": "c-reactive protein",
-    "hba1c": "hemoglobin a1c",
-    "a1c": "hemoglobin a1c",
-    "bnp": "brain natriuretic peptide",
-    "trop": "troponin",
-    "abg": "arterial blood gas",
-    "vbg": "venous blood gas",
-    "lytes": "electrolytes",
-}
-
-# ---------------------------------------------------------------------------
-# Ambiguity resolution rules
-# ---------------------------------------------------------------------------
-# Some abbreviations are ambiguous (e.g. "pt" = patient OR prothrombin time).
-# These context-dependent entries map (abbreviation, preceding_word_pattern) -> expansion.
-_CONTEXT_RULES: List[Tuple[str, str, str]] = [
-    # "pt" after lab-related context -> prothrombin time
-    ("pt", r"(?:check|draw|labs?|coags?|elevated|normal|prolonged|inr)\b", "prothrombin time"),
-    # "pt" in most other contexts -> patient
-    ("pt", r".*", "patient"),
-    # "ms" after diagnosis context -> multiple sclerosis
-    ("ms", r"(?:diagnosed|dx|history|hx|has|with)\b", "multiple sclerosis"),
-    # "ca" after lab context -> calcium
-    ("ca", r"(?:check|draw|labs?|level|low|high|elevated|normal)\b", "calcium"),
-    # "ca" after diagnosis context -> cancer
-    ("ca", r"(?:diagnosed|dx|history|hx|has|with|stage|mets?|metastatic)\b", "cancer"),
-]
+# Common English words that should NOT be expanded even if they appear
+# as abbreviations in the Meta-Inventory (prevents false positives).
+_ENGLISH_STOPWORDS = frozenset({
+    "a", "an", "as", "at", "be", "by", "do", "go", "he", "i", "if", "in",
+    "is", "it", "me", "my", "no", "of", "on", "or", "so", "to", "up", "us",
+    "we", "am", "are", "was", "has", "had", "the", "and", "for", "but",
+    "not", "you", "all", "can", "her", "him", "his", "how", "its", "may",
+    "new", "now", "old", "see", "two", "way", "who", "did", "get", "got",
+    "let", "say", "she", "too", "use", "man", "men", "end", "set", "run",
+    "add", "big", "own", "off", "top", "yes", "red", "per", "nor",
+})
 
 
-def _build_full_dictionary() -> Dict[str, str]:
-    """Merge all category dictionaries into one."""
-    combined = {}
-    combined.update(_GENERAL)
-    combined.update(_DIAGNOSES)
-    combined.update(_TREATMENT)
-    combined.update(_ANATOMY)
-    combined.update(_LABS)
-    return combined
+def _download_meta_inventory(cache_dir: str) -> Optional[str]:
+    """
+    Download the Meta-Inventory CSV from Zenodo and cache locally.
+
+    Returns the path to the cached CSV, or None if download fails.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_path = os.path.join(cache_dir, "meta_inventory.csv")
+
+    if os.path.exists(cached_path):
+        logger.info("Using cached Meta-Inventory: %s", cached_path)
+        return cached_path
+
+    try:
+        logger.info("Querying Zenodo API for Meta-Inventory files...")
+        req = urllib.request.Request(ZENODO_API_URL, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            record = json.loads(resp.read().decode("utf-8"))
+
+        # Find the CSV file in the record
+        csv_url = None
+        for f in record.get("files", []):
+            key = f.get("key", "")
+            if key.endswith(".csv"):
+                csv_url = f.get("links", {}).get("self")
+                break
+
+        if csv_url is None:
+            logger.warning("No CSV file found in Zenodo record %s.", ZENODO_RECORD_ID)
+            return None
+
+        logger.info("Downloading Meta-Inventory from %s ...", csv_url)
+        urllib.request.urlretrieve(csv_url, cached_path)
+        logger.info("Cached Meta-Inventory to %s", cached_path)
+        return cached_path
+
+    except Exception as e:
+        logger.warning("Failed to download Meta-Inventory: %s", e)
+        return None
+
+
+def _parse_meta_inventory(csv_path: str, min_length: int = 2) -> Tuple[Dict, Dict]:
+    """
+    Parse the Meta-Inventory CSV into abbreviation dictionaries.
+
+    Returns
+    -------
+    abbreviations : dict
+        Mapping of abbreviation (lowercase) -> preferred long form.
+    sense_inventory : dict
+        Mapping of abbreviation (lowercase) -> list of all known senses.
+    """
+    abbreviations = {}
+    sense_inventory = {}
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+
+        # Auto-detect column names (handle different formats)
+        sf_col = next((c for c in df.columns if c.upper() in ("SF", "SHORT_FORM", "ABBREVIATION")), None)
+        lf_col = next((c for c in df.columns if c.upper() in ("LF", "LONG_FORM", "EXPANSION")), None)
+        plf_col = next((c for c in df.columns if c.upper() in ("PLF", "PREFERRED_LONG_FORM")), None)
+
+        if sf_col is None or lf_col is None:
+            logger.warning("Meta-Inventory CSV missing expected columns (SF/LF). Found: %s", list(df.columns))
+            return {}, {}
+
+        for sf, group in df.groupby(sf_col):
+            sf_lower = str(sf).strip().lower()
+
+            # Filter: skip too-short or common English words
+            if len(sf_lower) < min_length:
+                continue
+            if sf_lower in _ENGLISH_STOPWORDS:
+                continue
+
+            senses = [str(lf).strip() for lf in group[lf_col].unique() if str(lf).strip()]
+            if not senses:
+                continue
+
+            sense_inventory[sf_lower] = senses
+
+            # Use PLF (Preferred Long Form) if available, else first sense
+            if plf_col and plf_col in df.columns:
+                plf_values = [str(v).strip() for v in group[plf_col].unique() if str(v).strip()]
+                abbreviations[sf_lower] = plf_values[0] if plf_values else senses[0]
+            else:
+                abbreviations[sf_lower] = senses[0]
+
+        logger.info(
+            "Parsed Meta-Inventory: %d abbreviations, %d ambiguous (multi-sense).",
+            len(abbreviations),
+            sum(1 for s in sense_inventory.values() if len(s) > 1),
+        )
+
+    except ImportError:
+        logger.warning("pandas not available; falling back to csv module for Meta-Inventory.")
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                _senses: Dict[str, List[str]] = {}
+                _preferred: Dict[str, str] = {}
+                for row in reader:
+                    sf = (row.get("SF") or row.get("Short_Form") or row.get("abbreviation") or "").strip().lower()
+                    lf = (row.get("LF") or row.get("Long_Form") or row.get("expansion") or "").strip()
+                    plf = (row.get("PLF") or row.get("Preferred_Long_Form") or "").strip()
+                    if not sf or not lf or len(sf) < min_length or sf in _ENGLISH_STOPWORDS:
+                        continue
+                    _senses.setdefault(sf, [])
+                    if lf not in _senses[sf]:
+                        _senses[sf].append(lf)
+                    if plf and sf not in _preferred:
+                        _preferred[sf] = plf
+
+                sense_inventory = _senses
+                for sf, senses in _senses.items():
+                    abbreviations[sf] = _preferred.get(sf, senses[0])
+
+            logger.info("Parsed Meta-Inventory (csv module): %d abbreviations.", len(abbreviations))
+        except Exception as e:
+            logger.warning("Failed to parse Meta-Inventory CSV: %s", e)
+
+    except Exception as e:
+        logger.warning("Failed to parse Meta-Inventory: %s", e)
+
+    return abbreviations, sense_inventory
+
+
+def _load_medialpy_abbreviations() -> Dict[str, str]:
+    """
+    Load abbreviations from the MEDIALpy package (pip install medialpy).
+
+    Returns abbreviation -> expansion dict, or empty dict if not installed.
+    """
+    try:
+        import medialpy
+        abbreviations = {}
+        # MEDIALpy stores abbreviations in alphabetical CSV files
+        # Access through the package API
+        for alpha_range in ["#-A", "B", "C", "D", "E", "F", "G", "H", "I",
+                            "J-K", "L", "M", "N", "O", "P-Q", "R", "S",
+                            "T", "U-Z"]:
+            try:
+                # medialpy.search returns matches
+                pass  # The API is lookup-based, not enumerable
+            except Exception:
+                continue
+
+        # MEDIALpy is lookup-only (not enumerable), so we use it as a
+        # fallback resolver rather than a bulk dictionary source
+        logger.info("MEDIALpy available for on-demand abbreviation lookup.")
+        return {}  # Can't enumerate; used on-demand via resolve_with_medialpy()
+    except ImportError:
+        return {}
+
+
+def _resolve_with_medialpy(abbreviation: str) -> Optional[str]:
+    """Try to resolve an abbreviation using MEDIALpy."""
+    try:
+        import medialpy
+        term = medialpy.find(abbreviation.upper())
+        if term and hasattr(term, "meaning") and term.meaning:
+            meanings = term.meaning
+            if isinstance(meanings, list):
+                return meanings[0].lower()
+            return str(meanings).lower()
+    except Exception:
+        pass
+    return None
 
 
 class ShorthandExpander:
     """
-    Expands physician shorthand abbreviations in clinical text.
+    Data-driven physician shorthand expansion.
 
-    Features:
-    - 300+ common medical abbreviations
-    - Context-sensitive disambiguation for ambiguous terms
-    - Preserves character offset mapping for NER alignment
-    - Case-insensitive matching with original-case output
-    - Configurable: can add custom abbreviations
+    Loads abbreviations from public sources in priority order:
+    1. Meta-Inventory (104K abbreviations from Zenodo, CC-BY-4.0)
+    2. MEDIALpy package (if pip-installed, MIT license)
+    3. Built-in fallback (~280 hand-curated clinical abbreviations)
+
+    Custom abbreviations and built-in clinical abbreviations always override
+    the Meta-Inventory, since the built-in set is specifically curated for
+    clinical note shorthand.
+
+    For ambiguous abbreviations, supports three disambiguation strategies:
+    - "preferred": Use Preferred Long Form from Meta-Inventory (default, fast)
+    - "transformer": Use MeDAL ELECTRA model for contextual disambiguation
+    - "context_rules": Use hand-crafted regex patterns (legacy)
+
+    Parameters
+    ----------
+    source : str
+        Abbreviation source: "auto" (try Meta-Inventory, then fallback),
+        "meta_inventory", "builtin", or a path to a CSV file.
+    cache_dir : str, optional
+        Cache directory for downloaded data.
+    disambiguation : str
+        Strategy for ambiguous abbreviations: "preferred", "transformer",
+        or "context_rules".
+    custom_abbreviations : dict, optional
+        Additional abbreviation -> expansion mappings (highest priority).
+    min_abbreviation_length : int
+        Minimum abbreviation length from Meta-Inventory (default 2).
+    expand_in_place : bool
+        If True, replace abbreviations in text. If False, only annotate.
     """
 
     def __init__(
         self,
+        source: str = "auto",
+        cache_dir: Optional[str] = None,
+        disambiguation: str = "preferred",
         custom_abbreviations: Optional[Dict[str, str]] = None,
+        min_abbreviation_length: int = 2,
         expand_in_place: bool = True,
     ):
-        """
-        Parameters
-        ----------
-        custom_abbreviations : dict, optional
-            Additional abbreviation -> expansion mappings.
-        expand_in_place : bool
-            If True, replace abbreviations in the text. If False, only
-            annotate them (useful for training data where you want both).
-        """
-        self.abbreviations = _build_full_dictionary()
+        self.expand_in_place = expand_in_place
+        self._disambiguation = disambiguation
+        self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
+        self._min_length = min_abbreviation_length
+        self._sense_inventory: Dict[str, List[str]] = {}
+        self._disambiguator = None
+        self._medialpy_available = False
+
+        # Load abbreviations from the specified source
+        self.abbreviations = self._load_abbreviations(source)
+        self._source_loaded = source
+
+        # Apply custom overrides (highest priority)
         if custom_abbreviations:
             self.abbreviations.update(
                 {k.lower(): v for k, v in custom_abbreviations.items()}
             )
-        self.expand_in_place = expand_in_place
-        self.context_rules = _CONTEXT_RULES
 
-        # Build regex pattern for matching abbreviations as whole words
-        # Sort by length (longest first) to match longer abbreviations first
-        escaped = [re.escape(abbr) for abbr in sorted(self.abbreviations, key=len, reverse=True)]
+        # Load context rules for "context_rules" disambiguation
+        from src.clinical._shorthand_fallback import FALLBACK_CONTEXT_RULES
+        self.context_rules = list(FALLBACK_CONTEXT_RULES)
+
+        # Check MEDIALpy availability
+        try:
+            import medialpy
+            self._medialpy_available = True
+        except ImportError:
+            self._medialpy_available = False
+
+        # Build regex pattern for matching
+        self._build_pattern()
+        logger.info(
+            "ShorthandExpander: %d abbreviations loaded (source=%s, disambiguation=%s).",
+            len(self.abbreviations), source, disambiguation,
+        )
+
+    def _load_abbreviations(self, source: str) -> Dict[str, str]:
+        """Load abbreviations from the specified source."""
+        from src.clinical._shorthand_fallback import FALLBACK_ABBREVIATIONS
+
+        if source == "builtin":
+            return dict(FALLBACK_ABBREVIATIONS)
+
+        meta_inventory_abbrs = {}
+        meta_sense_inventory = {}
+
+        if source in ("auto", "meta_inventory"):
+            csv_path = _download_meta_inventory(self._cache_dir)
+            if csv_path:
+                meta_inventory_abbrs, meta_sense_inventory = _parse_meta_inventory(
+                    csv_path, min_length=self._min_length,
+                )
+
+        elif os.path.isfile(source):
+            # Load from a local CSV file
+            meta_inventory_abbrs, meta_sense_inventory = _parse_meta_inventory(
+                source, min_length=self._min_length,
+            )
+
+        self._sense_inventory = meta_sense_inventory
+
+        if meta_inventory_abbrs:
+            # Start with Meta-Inventory, then override with built-in
+            # (built-in abbreviations are clinical-note-specific and take priority)
+            combined = dict(meta_inventory_abbrs)
+            combined.update(FALLBACK_ABBREVIATIONS)
+            return combined
+        else:
+            if source not in ("auto", "builtin"):
+                logger.warning(
+                    "Could not load from source '%s'. Using built-in fallback.", source,
+                )
+            return dict(FALLBACK_ABBREVIATIONS)
+
+    def _build_pattern(self) -> None:
+        """Build regex pattern for matching abbreviations as whole words."""
+        escaped = [
+            re.escape(abbr)
+            for abbr in sorted(self.abbreviations, key=len, reverse=True)
+        ]
         self._pattern = re.compile(
             r'\b(' + '|'.join(escaped) + r')\b',
             re.IGNORECASE,
         )
-        logger.info("ShorthandExpander initialised with %d abbreviations.", len(self.abbreviations))
 
-    def _resolve_ambiguous(self, abbr: str, context_before: str) -> Optional[str]:
+    def _resolve_expansion(self, abbr: str, context_before: str) -> str:
         """
-        Resolve ambiguous abbreviations using preceding context.
+        Resolve the best expansion for an abbreviation.
 
-        Returns the expansion if a context rule matches, else None.
+        Tries disambiguation strategies in order based on self._disambiguation.
         """
         abbr_lower = abbr.lower()
-        for rule_abbr, pattern, expansion in self.context_rules:
-            if rule_abbr == abbr_lower:
-                if re.search(pattern, context_before, re.IGNORECASE):
-                    return expansion
-        return None
+
+        # Strategy: context_rules
+        if self._disambiguation == "context_rules":
+            for rule_abbr, pattern, expansion in self.context_rules:
+                if rule_abbr == abbr_lower:
+                    if re.search(pattern, context_before, re.IGNORECASE):
+                        return expansion
+
+        # Strategy: transformer (lazy-loaded MeDAL model)
+        if self._disambiguation == "transformer":
+            senses = self._sense_inventory.get(abbr_lower, [])
+            if len(senses) > 1 and self._disambiguator is not None:
+                try:
+                    result = self._disambiguator.disambiguate_from_context(
+                        context_before, abbr, senses,
+                    )
+                    if result:
+                        return result
+                except Exception:
+                    pass  # Fall through to dictionary lookup
+
+        # Strategy: preferred (default) — just use the dictionary
+        expansion = self.abbreviations.get(abbr_lower)
+        if expansion:
+            return expansion
+
+        # Last resort: try MEDIALpy for unknown abbreviations
+        if self._medialpy_available:
+            medialpy_result = _resolve_with_medialpy(abbr)
+            if medialpy_result:
+                return medialpy_result
+
+        return abbr
+
+    @property
+    def disambiguator(self):
+        """Lazy-load the MeDAL disambiguation model."""
+        if self._disambiguator is None and self._disambiguation == "transformer":
+            from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
+            self._disambiguator = AbbreviationDisambiguator()
+        return self._disambiguator
 
     def expand(self, text: str) -> str:
         """
@@ -392,22 +421,18 @@ class ShorthandExpander:
         if not self.expand_in_place:
             return text
 
+        # Ensure disambiguator is loaded if needed
+        if self._disambiguation == "transformer" and self._disambiguator is None:
+            try:
+                self._disambiguator = self.disambiguator
+            except Exception:
+                pass
+
         def _replace(match):
             abbr = match.group(0)
-            abbr_lower = abbr.lower()
-
-            # Try context-sensitive resolution first
             context_before = text[:match.start()].split()
             context_word = context_before[-1] if context_before else ""
-            resolved = self._resolve_ambiguous(abbr, context_word)
-            if resolved is not None:
-                return resolved
-
-            # Fall back to dictionary lookup
-            expansion = self.abbreviations.get(abbr_lower)
-            if expansion:
-                return expansion
-            return abbr
+            return self._resolve_expansion(abbr, context_word)
 
         return self._pattern.sub(_replace, text)
 
@@ -423,6 +448,13 @@ class ShorthandExpander:
             Each dict: {original_start, original_end, expanded_start, expanded_end,
                         abbreviation, expansion}
         """
+        # Ensure disambiguator is loaded if needed
+        if self._disambiguation == "transformer" and self._disambiguator is None:
+            try:
+                self._disambiguator = self.disambiguator
+            except Exception:
+                pass
+
         offset_map = []
         result_parts = []
         last_end = 0
@@ -430,14 +462,11 @@ class ShorthandExpander:
 
         for match in self._pattern.finditer(text):
             abbr = match.group(0)
-            abbr_lower = abbr.lower()
 
             # Resolve expansion
             context_before = text[:match.start()].split()
             context_word = context_before[-1] if context_before else ""
-            expansion = self._resolve_ambiguous(abbr, context_word)
-            if expansion is None:
-                expansion = self.abbreviations.get(abbr_lower, abbr)
+            expansion = self._resolve_expansion(abbr, context_word)
 
             result_parts.append(text[last_end:match.start()])
             expanded_start = match.start() + cumulative_shift
@@ -470,10 +499,33 @@ class ShorthandExpander:
             abbr = match.group(0)
             abbr_lower = abbr.lower()
             expansion = self.abbreviations.get(abbr_lower, "unknown")
-            found.append({
+
+            entry = {
                 "abbreviation": abbr,
                 "expansion": expansion,
                 "start": match.start(),
                 "end": match.end(),
-            })
+            }
+
+            # Add sense information if available
+            senses = self._sense_inventory.get(abbr_lower, [])
+            if len(senses) > 1:
+                entry["ambiguous"] = True
+                entry["senses"] = senses
+
+            found.append(entry)
         return found
+
+    @property
+    def num_abbreviations(self) -> int:
+        """Total number of abbreviations in the dictionary."""
+        return len(self.abbreviations)
+
+    @property
+    def num_ambiguous(self) -> int:
+        """Number of abbreviations with multiple known senses."""
+        return sum(1 for s in self._sense_inventory.values() if len(s) > 1)
+
+    def get_senses(self, abbreviation: str) -> List[str]:
+        """Get all known senses for an abbreviation."""
+        return self._sense_inventory.get(abbreviation.lower(), [])

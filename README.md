@@ -9,7 +9,7 @@
 - **Data-driven ICD-10-CM entity linking** — Loads the full 51K ICD-10-CM code set from [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) (MIT licensed), builds a TF-IDF character n-gram index following [SciSpacy's](https://github.com/allenai/scispacy) EntityLinker architecture for fast entity-to-code matching
 - **Transformer-based assertion detection** — Wraps [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) (ClinicalBERT fine-tuned on i2b2) for learned PRESENT/ABSENT/POSSIBLE classification, as an alternative to rule-based NegEx/ConText
 - **Rule-based negation detection** — ConText/NegEx-style algorithm with 70+ trigger patterns, scope termination, pseudo-negation handling, and support for possibility/historical/family context
-- **Physician shorthand expansion** — 300+ medical abbreviations with context-sensitive disambiguation and character offset tracking
+- **Data-driven abbreviation expansion** — Loads 104K medical abbreviations from the [Meta-Inventory](https://zenodo.org/records/4567594) (CC-BY-4.0), with [MEDIALpy](https://pypi.org/project/medialpy/) fallback and ~280 hand-curated clinical abbreviations as built-in default. Supports contextual disambiguation via [MeDAL ELECTRA](https://huggingface.co/McGill-NLP/electra-medal) for ambiguous terms
 - **Span-to-BIO conversion** — Automatic conversion of character-offset annotations to BIO tag sequences for datasets that use span format
 - **Optional CRF layer** — Conditional Random Field for structured label decoding
 - **Entity-level evaluation** — Strict entity-level precision/recall/F1 (seqeval or built-in fallback)
@@ -24,12 +24,14 @@ Medical_Code_Intelligence/
 │   └── ner_config.py          # Model, dataset, and training configs
 ├── src/
 │   ├── clinical/
-│   │   ├── shorthand.py       # Physician abbreviation expansion (300+ terms)
-│   │   ├── negation.py        # NegEx/ConText rule-based negation detection
-│   │   ├── assertion.py       # Transformer-based assertion classifier (bvanaken model)
-│   │   ├── icd_codes.py       # Data-driven ICD-10-CM TF-IDF entity linker
-│   │   ├── _icd_fallback.py   # Minimal offline fallback codes (~45 high-frequency)
-│   │   └── pipeline.py        # Unified medical coding NER pipeline
+│   │   ├── shorthand.py                # Data-driven abbreviation expansion (Meta-Inventory + fallback)
+│   │   ├── abbreviation_disambiguator.py  # MeDAL ELECTRA contextual disambiguation
+│   │   ├── _shorthand_fallback.py      # Built-in ~280 clinical abbreviations
+│   │   ├── negation.py                 # NegEx/ConText rule-based negation detection
+│   │   ├── assertion.py                # Transformer-based assertion classifier (bvanaken model)
+│   │   ├── icd_codes.py                # Data-driven ICD-10-CM TF-IDF entity linker
+│   │   ├── _icd_fallback.py            # Minimal offline fallback codes (~45 high-frequency)
+│   │   └── pipeline.py                 # Unified medical coding NER pipeline
 │   ├── data/
 │   │   ├── dataset_loader.py  # HuggingFace dataset loaders + span→BIO conversion
 │   │   ├── preprocessing.py   # Subword tokenization & label alignment
@@ -50,7 +52,7 @@ Medical_Code_Intelligence/
 │   ├── evaluate.py            # Evaluation CLI with error analysis
 │   ├── predict.py             # Prediction CLI (interactive + batch)
 │   └── benchmark.py           # Multi-model x multi-dataset benchmarking
-├── tests/                     # 185 tests covering all modules
+├── tests/                     # 211 tests covering all modules
 ├── requirements.txt
 └── setup.py
 ```
@@ -194,6 +196,38 @@ for r in results:
 # chest pain: ['R07.9']
 ```
 
+### Abbreviation Datasets
+
+These datasets power the abbreviation expansion and disambiguation modules.
+
+| Key | Source | Description | Records |
+|-----|--------|-------------|---------|
+| Meta-Inventory | [Zenodo 10.5281/zenodo.4567594](https://zenodo.org/records/4567594) | 104K medical abbreviations with preferred long forms (CC-BY-4.0) | 104,057 abbreviations / 170,426 senses |
+| `medal` | [McGill-NLP/medal](https://huggingface.co/datasets/McGill-NLP/medal) | 14M PubMed abstracts for abbreviation disambiguation pre-training | 14M abstracts |
+| `casi` | [mitclinicalml/clinical-ie](https://huggingface.co/datasets/mitclinicalml/clinical-ie) | CASI: 18K clinical abbreviation disambiguation examples (41 acronyms) | 18,164 examples |
+| MEDIALpy | [PyPI: medialpy](https://pypi.org/project/medialpy/) | pip-installable medical abbreviation lookup (MIT) | Several thousand |
+
+**Load abbreviations from Meta-Inventory:**
+
+```python
+from src.clinical.shorthand import ShorthandExpander
+
+# Automatically downloads and caches 104K abbreviations from Zenodo
+expander = ShorthandExpander(source="meta_inventory")
+print(f"Loaded {expander.num_abbreviations} abbreviations")
+print(f"Ambiguous: {expander.num_ambiguous}")
+```
+
+**Evaluate disambiguation on CASI:**
+
+```python
+from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
+
+disambiguator = AbbreviationDisambiguator()
+results = disambiguator.evaluate_on_casi(max_examples=1000)
+print(f"Accuracy: {results['accuracy']:.1%}")
+```
+
 ### How the ICD Entity Linker Works
 
 The `ICDCodeLookup` follows [SciSpacy's EntityLinker](https://github.com/allenai/scispacy) architecture:
@@ -295,14 +329,82 @@ pipeline = MedicalCodingPipeline(
 # instead of rule-based NegEx for assertion detection
 ```
 
-### Shorthand Expansion
+### Shorthand Expansion: Data-Driven Sources
+
+The `ShorthandExpander` loads abbreviations from public datasets in priority order:
 
 ```python
 from src.clinical.shorthand import ShorthandExpander
 
-expander = ShorthandExpander()
+# Default: tries Meta-Inventory from Zenodo, falls back to built-in
+expander = ShorthandExpander()  # source="auto"
+
+# Explicit source selection
+expander = ShorthandExpander(source="builtin")          # ~280 hand-curated only
+expander = ShorthandExpander(source="meta_inventory")   # 104K from Zenodo
+expander = ShorthandExpander(source="path/to/abbrs.csv") # custom CSV
+
+# Basic expansion
 text = expander.expand("pt c/o sob, htn well controlled on meds")
 # "patient complaining of shortness of breath, hypertension well controlled on meds"
+
+# Expansion with offset tracking (for NER alignment)
+expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
+# offsets tracks original→expanded character positions for each abbreviation
+
+# Identify abbreviations without expanding
+found = expander.identify_abbreviations("pt c/o sob and cp")
+# [{'abbreviation': 'pt', 'expansion': 'patient', 'start': 0, 'end': 2}, ...]
+
+# Check available senses for ambiguous abbreviations
+senses = expander.get_senses("pt")
+# ['Patient', 'Prothrombin Time'] (when Meta-Inventory loaded)
+
+print(f"Total abbreviations: {expander.num_abbreviations}")
+print(f"Ambiguous (multi-sense): {expander.num_ambiguous}")
+```
+
+### Abbreviation Disambiguation
+
+Three strategies for resolving ambiguous abbreviations (e.g., "PT" = patient vs prothrombin time):
+
+**Preferred Long Form (default, fast):**
+
+```python
+# Uses the Preferred Long Form (PLF) from Meta-Inventory
+expander = ShorthandExpander(disambiguation="preferred")
+```
+
+**Rule-based context matching (legacy):**
+
+```python
+# Uses hand-crafted regex patterns for context-sensitive resolution
+expander = ShorthandExpander(disambiguation="context_rules")
+expander.expand("check pt")       # "check prothrombin time" (lab context)
+expander.expand("the pt reports")  # "the patient reports" (general context)
+```
+
+**MeDAL ELECTRA transformer (learned, most accurate):**
+
+```python
+from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
+
+# Use MeDAL ELECTRA model for contextual disambiguation
+expander = ShorthandExpander(disambiguation="transformer")
+
+# Or use the disambiguator directly
+disambiguator = AbbreviationDisambiguator()
+best_sense = disambiguator.disambiguate(
+    text="Patient presents with SOB and fatigue.",
+    abbreviation="SOB",
+    abbr_start=21, abbr_end=24,
+    senses=["shortness of breath", "side of bed"],
+)
+# "shortness of breath" (contextually correct)
+
+# Evaluate on CASI benchmark
+results = disambiguator.evaluate_on_casi()
+# {'accuracy': 0.85, 'correct': 15439, 'total': 18164, ...}
 ```
 
 ### Span-to-BIO Conversion
@@ -355,6 +457,9 @@ Modern clinical NLP consensus (reflected in MedSpacy, cTAKES, and SciSpacy) favo
 |-----------|---------|---------|---------|
 | ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
+| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 abbreviations |
+| Disambiguation model | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | Pre-trained on 14M abstracts |
+| Disambiguation eval | [mitclinicalml/clinical-ie](https://huggingface.co/datasets/mitclinicalml/clinical-ie) (CASI) | MIT | 18,164 examples |
 | Biomedical NER | [knowledgator/biomed_NER](https://huggingface.co/datasets/knowledgator/biomed_NER) | Apache 2.0 | 24 entity types |
 | Disease NER | [ncbi_disease](https://huggingface.co/datasets/ncbi_disease) | CC BY 4.0 | 6.9K sentences |
 | Drug+Disease NER | [bc5cdr](https://huggingface.co/datasets/bigbio/bc5cdr) | Public domain | 1.5K abstracts |
@@ -379,4 +484,4 @@ This system implements the following SOTA practices:
 python -m pytest tests/ -v
 ```
 
-185 tests covering ICD TF-IDF entity linking, assertion classification, shorthand expansion, negation detection, pipeline integration, span-to-BIO conversion, tokenization alignment, and clinical scenario end-to-end flows.
+211 tests covering ICD TF-IDF entity linking, assertion classification, abbreviation disambiguation, data-driven shorthand expansion, Meta-Inventory parsing, negation detection, pipeline integration, span-to-BIO conversion, tokenization alignment, and clinical scenario end-to-end flows.
