@@ -63,6 +63,10 @@ class MedicalCodingPipeline:
     """
     End-to-end pipeline for medical coding NER.
 
+    Supports two negation strategies:
+    - "rules" (default): ConText/NegEx rule-based detector (fast, no GPU)
+    - "transformer": bvanaken/clinical-assertion-negation-bert (learned, GPU-optional)
+
     Usage
     -----
     >>> pipeline = MedicalCodingPipeline(model_path="outputs/best_model")
@@ -82,12 +86,14 @@ class MedicalCodingPipeline:
         Whether to expand physician abbreviations before NER.
     detect_negation : bool
         Whether to run negation/context detection on extracted entities.
+    negation_strategy : str
+        "rules" for ConText/NegEx, "transformer" for learned assertion model.
     device : str, optional
         Torch device. Auto-detected if None.
     custom_abbreviations : dict, optional
         Additional abbreviation mappings to add.
     negation_scope_window : int
-        Max word-distance for negation scope propagation.
+        Max word-distance for rule-based negation scope propagation.
     """
 
     def __init__(
@@ -95,12 +101,14 @@ class MedicalCodingPipeline:
         model_path: Optional[str] = None,
         expand_shorthand: bool = True,
         detect_negation: bool = True,
+        negation_strategy: str = "rules",
         device: Optional[str] = None,
         custom_abbreviations: Optional[Dict[str, str]] = None,
         negation_scope_window: int = 6,
     ):
         self.expand_shorthand = expand_shorthand
         self.detect_negation = detect_negation
+        self.negation_strategy = negation_strategy
 
         # Initialise sub-components
         if expand_shorthand:
@@ -111,11 +119,18 @@ class MedicalCodingPipeline:
             self.shorthand_expander = None
 
         if detect_negation:
-            self.negation_detector = NegationDetector(
-                scope_window=negation_scope_window,
-            )
+            if negation_strategy == "transformer":
+                from src.clinical.assertion import AssertionClassifier
+                self.negation_detector = None
+                self.assertion_classifier = AssertionClassifier(device=device)
+            else:
+                self.negation_detector = NegationDetector(
+                    scope_window=negation_scope_window,
+                )
+                self.assertion_classifier = None
         else:
             self.negation_detector = None
+            self.assertion_classifier = None
 
         # NER predictor (lazy-loaded if model_path given)
         self._predictor = None
@@ -246,8 +261,16 @@ class MedicalCodingPipeline:
         if self.shorthand_expander is not None:
             expanded_text, offset_map = self.shorthand_expander.expand_with_offsets(text)
 
-        if self.negation_detector is not None and entities:
-            entities = self.negation_detector.annotate_entities(expanded_text, entities)
+        # Apply negation detection (rule-based or transformer)
+        if entities:
+            if self.assertion_classifier is not None:
+                entities = self.assertion_classifier.annotate_entities(
+                    expanded_text, entities,
+                )
+            elif self.negation_detector is not None:
+                entities = self.negation_detector.annotate_entities(
+                    expanded_text, entities,
+                )
 
         results = []
         for ent in entities:

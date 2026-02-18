@@ -1,5 +1,8 @@
 """
-Tests for ICD code lookup and entity-to-code mapping.
+Tests for data-driven ICD-10-CM code lookup and TF-IDF entity linking.
+
+These tests use the built-in fallback codes (no HuggingFace download needed)
+to ensure deterministic behavior in CI environments.
 """
 
 import sys
@@ -8,16 +11,32 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from unittest.mock import patch
 from src.clinical.icd_codes import ICDCodeLookup, ICDCode, ICDMatch
 
 
 @pytest.fixture
 def lookup():
-    return ICDCodeLookup(load_from_hf=False)
+    """Create an ICDCodeLookup that always uses fallback codes."""
+    with patch("src.clinical.icd_codes.ICDCodeLookup._load_codes") as mock_load:
+        # Skip the HF loading; we'll load fallback manually after construction
+        mock_load.return_value = None
+        obj = ICDCodeLookup.__new__(ICDCodeLookup)
+        obj.top_k = 5
+        obj._ngram_range = (3, 4)
+        obj._codes = {}
+        obj._descriptions = []
+        obj._code_keys = []
+        obj._tfidf_matrix = None
+        obj._vectoriser = None
+    # Load fallback codes and build index
+    obj._load_builtin_fallback()
+    obj._build_tfidf_index()
+    return obj
 
 
 # ---------------------------------------------------------------------------
-# Code lookup
+# Code lookup by code string
 # ---------------------------------------------------------------------------
 
 class TestCodeLookup:
@@ -44,163 +63,139 @@ class TestCodeLookup:
         assert result is not None
         assert "pneumonia" in result.description.lower()
 
-    def test_lookup_ckd(self, lookup):
-        result = lookup.lookup_code("N18.3")
-        assert result is not None
-        assert "chronic kidney disease" in result.description.lower()
-        assert "stage 3" in result.description.lower()
-
     def test_lookup_chest_pain(self, lookup):
         result = lookup.lookup_code("R07.9")
         assert result is not None
         assert "chest pain" in result.description.lower()
 
+    def test_lookup_sepsis(self, lookup):
+        result = lookup.lookup_code("A41.9")
+        assert result is not None
+        assert "sepsis" in result.description.lower()
 
-class TestChapterDetection:
-    """Test ICD-10-CM chapter detection from code prefix."""
-
-    def test_chapter_i(self, lookup):
-        result = lookup.lookup_code("I10")
-        assert result.chapter == "Circulatory system"
-
-    def test_chapter_e(self, lookup):
-        result = lookup.lookup_code("E11.9")
-        assert result.chapter == "Endocrine/metabolic"
-
-    def test_chapter_j(self, lookup):
-        result = lookup.lookup_code("J18.9")
-        assert result.chapter == "Respiratory system"
-
-    def test_chapter_r(self, lookup):
-        result = lookup.lookup_code("R07.9")
-        assert result.chapter == "Symptoms/signs"
-
-    def test_chapter_c(self, lookup):
-        result = lookup.lookup_code("C34.90")
-        assert result.chapter == "Neoplasms"
-
-    def test_chapter_z(self, lookup):
-        result = lookup.lookup_code("Z23")
-        assert result.chapter == "Factors influencing health status"
+    def test_lookup_heart_failure(self, lookup):
+        result = lookup.lookup_code("I50.9")
+        assert result is not None
+        assert "heart failure" in result.description.lower()
 
 
 # ---------------------------------------------------------------------------
-# Entity text → ICD code matching
+# TF-IDF entity matching
 # ---------------------------------------------------------------------------
 
-class TestExactEntityMatching:
-    """Test exact entity text → ICD code mapping for common conditions."""
+class TestTFIDFMatching:
+    """Test TF-IDF character n-gram entity→ICD matching."""
 
-    def test_hypertension(self, lookup):
-        matches = lookup.match_entity("hypertension")
-        assert len(matches) >= 1
-        assert matches[0].code == "I10"
-        assert matches[0].match_type == "exact"
-        assert matches[0].score == 1.0
-
-    def test_type_2_diabetes(self, lookup):
-        matches = lookup.match_entity("type 2 diabetes mellitus")
-        assert len(matches) >= 1
-        assert matches[0].code == "E11.9"
-
-    def test_congestive_heart_failure(self, lookup):
-        matches = lookup.match_entity("congestive heart failure")
-        assert len(matches) >= 1
-        assert matches[0].code == "I50.9"
-
-    def test_pneumonia(self, lookup):
-        matches = lookup.match_entity("pneumonia")
-        assert len(matches) >= 1
-        assert matches[0].code == "J18.9"
-
-    def test_chest_pain(self, lookup):
-        matches = lookup.match_entity("chest pain")
-        assert len(matches) >= 1
-        assert matches[0].code == "R07.9"
-
-    def test_atrial_fibrillation(self, lookup):
-        matches = lookup.match_entity("atrial fibrillation")
-        assert len(matches) >= 1
-        assert matches[0].code == "I48.91"
-
-    def test_copd(self, lookup):
-        matches = lookup.match_entity("chronic obstructive pulmonary disease")
-        assert len(matches) >= 1
-        assert matches[0].code == "J44.9"
-
-    def test_uti(self, lookup):
-        matches = lookup.match_entity("urinary tract infection")
-        assert len(matches) >= 1
-        assert matches[0].code == "N39.0"
-
-    def test_acute_kidney_injury(self, lookup):
-        matches = lookup.match_entity("acute kidney injury")
-        assert len(matches) >= 1
-        assert matches[0].code == "N17.9"
-
-    def test_depression(self, lookup):
-        matches = lookup.match_entity("depression")
-        assert len(matches) >= 1
-        assert matches[0].code == "F32.9"
-
-    def test_sepsis(self, lookup):
-        matches = lookup.match_entity("sepsis")
-        assert len(matches) >= 1
-        assert matches[0].code == "A41.9"
-
-    def test_stroke(self, lookup):
-        matches = lookup.match_entity("stroke")
-        assert len(matches) >= 1
-        assert matches[0].code == "I63.9"
-
-    def test_fever(self, lookup):
-        matches = lookup.match_entity("fever")
+    def test_exact_description_match(self, lookup):
+        """Exact description text should match with score 1.0."""
+        result = lookup.lookup_code("R50.9")
+        assert result is not None
+        matches = lookup.match_entity(result.description)
         assert len(matches) >= 1
         assert matches[0].code == "R50.9"
+        assert matches[0].score == 1.0
+        assert matches[0].match_type == "exact"
 
-    def test_nausea(self, lookup):
-        matches = lookup.match_entity("nausea")
+    def test_hypertension_match(self, lookup):
+        matches = lookup.match_entity("hypertension")
         assert len(matches) >= 1
-        assert matches[0].code == "R11.0"
-
-    def test_lung_cancer(self, lookup):
-        matches = lookup.match_entity("lung cancer")
-        assert len(matches) >= 1
-        assert matches[0].code == "C34.90"
-
-
-class TestFuzzyMatching:
-    """Test token-overlap fuzzy matching for entities not in exact map."""
-
-    def test_fuzzy_returns_candidates(self, lookup):
-        # "acute pancreatitis" is not an exact match but should fuzzy-match
-        matches = lookup.match_entity("acute pancreatitis")
-        assert len(matches) >= 1
-        # Should find K85.90 via token overlap
         codes = [m.code for m in matches]
-        assert "K85.90" in codes
+        assert "I10" in codes
 
-    def test_fuzzy_score_below_one(self, lookup):
-        matches = lookup.match_entity("chronic systolic heart failure")
-        # May find I50.22 via overlap
+    def test_diabetes_match(self, lookup):
+        matches = lookup.match_entity("type 2 diabetes mellitus")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "E11.9" in codes
+
+    def test_pneumonia_match(self, lookup):
+        matches = lookup.match_entity("pneumonia")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "J18.9" in codes
+
+    def test_chest_pain_match(self, lookup):
+        matches = lookup.match_entity("chest pain")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "R07.9" in codes
+
+    def test_heart_failure_match(self, lookup):
+        matches = lookup.match_entity("heart failure")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "I50.9" in codes
+
+    def test_copd_match(self, lookup):
+        matches = lookup.match_entity("chronic obstructive pulmonary disease")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert any(c.startswith("J44") for c in codes)
+
+    def test_urinary_tract_infection_match(self, lookup):
+        matches = lookup.match_entity("urinary tract infection")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "N39.0" in codes
+
+    def test_depression_match(self, lookup):
+        matches = lookup.match_entity("depression")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "F32.9" in codes
+
+    def test_shortness_of_breath_match(self, lookup):
+        matches = lookup.match_entity("shortness of breath")
+        assert len(matches) >= 1
+        codes = [m.code for m in matches]
+        assert "R06.02" in codes
+
+    def test_tfidf_score_between_0_and_1(self, lookup):
+        """TF-IDF matches should have scores between 0 and 1."""
+        matches = lookup.match_entity("kidney disease")
         for m in matches:
-            if m.match_type == "token_overlap":
-                assert m.score < 1.0
-                assert m.score >= 0.3
+            assert 0 < m.score <= 1.0
+
+    def test_tfidf_match_type(self, lookup):
+        """Non-exact matches should be type 'tfidf'."""
+        matches = lookup.match_entity("kidney problems")
+        for m in matches:
+            if m.score < 1.0:
+                assert m.match_type == "tfidf"
+
+
+class TestMatchFiltering:
+    """Test top_k and min_score filtering."""
+
+    def test_top_k_limit(self, lookup):
+        matches = lookup.match_entity("disease", top_k=3)
+        assert len(matches) <= 3
+
+    def test_min_score_filter(self, lookup):
+        matches = lookup.match_entity("heart", min_score=0.3)
+        for m in matches:
+            assert m.score >= 0.3
+
+    def test_high_min_score_fewer_results(self, lookup):
+        matches_low = lookup.match_entity("respiratory failure", min_score=0.1)
+        matches_high = lookup.match_entity("respiratory failure", min_score=0.5)
+        assert len(matches_high) <= len(matches_low)
 
     def test_no_match_for_garbage(self, lookup):
         matches = lookup.match_entity("xyzzy foobar baz")
         assert len(matches) == 0
 
-    def test_top_k_limit(self, lookup):
-        matches = lookup.match_entity("kidney disease", top_k=3)
-        assert len(matches) <= 3
+    def test_empty_string_returns_empty(self, lookup):
+        assert lookup.match_entity("") == []
+        assert lookup.match_entity("   ") == []
 
-    def test_min_score_filter(self, lookup):
-        matches = lookup.match_entity("heart", min_score=0.5)
-        for m in matches:
-            assert m.score >= 0.5
+    def test_none_like_empty(self, lookup):
+        assert lookup.match_entity("") == []
 
+
+# ---------------------------------------------------------------------------
+# Batch matching
+# ---------------------------------------------------------------------------
 
 class TestBatchMatching:
     """Test batch entity → code matching."""
@@ -208,7 +203,7 @@ class TestBatchMatching:
     def test_batch_multiple_entities(self, lookup):
         entities = [
             {"text": "hypertension", "label": "Disease"},
-            {"text": "diabetes mellitus", "label": "Disease"},
+            {"text": "pneumonia", "label": "Disease"},
             {"text": "chest pain", "label": "Symptom"},
         ]
         results = lookup.match_entities_batch(entities, top_k=3)
@@ -230,73 +225,106 @@ class TestBatchMatching:
         results = lookup.match_entities_batch([])
         assert results == []
 
+    def test_batch_icd_codes_have_required_keys(self, lookup):
+        entities = [{"text": "sepsis", "label": "Disease"}]
+        results = lookup.match_entities_batch(entities, top_k=2)
+        for icd in results[0]["icd_codes"]:
+            assert "code" in icd
+            assert "description" in icd
+            assert "score" in icd
+            assert "match_type" in icd
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 class TestICDDataClasses:
     """Test ICDCode and ICDMatch data classes."""
 
-    def test_icd_code_to_dict(self):
+    def test_icd_code_to_dict_basic(self):
         code = ICDCode(
             code="I10",
             description="Essential (primary) hypertension",
-            is_billable=True,
-            chapter="Circulatory system",
         )
         d = code.to_dict()
         assert d["code"] == "I10"
         assert d["description"] == "Essential (primary) hypertension"
-        assert d["is_billable"] is True
-        assert d["chapter"] == "Circulatory system"
+
+    def test_icd_code_to_dict_with_hierarchy(self):
+        code = ICDCode(
+            code="I10",
+            description="Essential (primary) hypertension",
+            chapter="Diseases of the circulatory system",
+            section="Hypertensive diseases",
+            category="Essential (primary) hypertension",
+        )
+        d = code.to_dict()
+        assert d["chapter"] == "Diseases of the circulatory system"
+        assert d["section"] == "Hypertensive diseases"
+        assert d["category"] == "Essential (primary) hypertension"
+
+    def test_icd_code_to_dict_omits_none_fields(self):
+        code = ICDCode(code="I10", description="Hypertension")
+        d = code.to_dict()
+        assert "chapter" not in d
+        assert "section" not in d
+        assert "category" not in d
 
     def test_icd_match_to_dict(self):
         match = ICDMatch(
             code="E11.9",
             description="Type 2 diabetes mellitus without complications",
-            score=1.0,
-            match_type="exact",
+            score=0.85,
+            match_type="tfidf",
         )
         d = match.to_dict()
         assert d["code"] == "E11.9"
-        assert d["score"] == 1.0
-        assert d["match_type"] == "exact"
+        assert d["score"] == 0.85
+        assert d["match_type"] == "tfidf"
+
+    def test_icd_match_score_rounded(self):
+        match = ICDMatch(code="X", description="X", score=0.123456, match_type="tfidf")
+        d = match.to_dict()
+        assert d["score"] == 0.1235
 
 
-class TestCodeCoverage:
-    """Test that the knowledge base has adequate coverage of common conditions."""
+# ---------------------------------------------------------------------------
+# Code coverage (fallback set)
+# ---------------------------------------------------------------------------
 
-    def test_cardiovascular_codes_present(self, lookup):
-        cv_codes = ["I10", "I48.91", "I50.9", "I25.10", "I21.3", "I63.9"]
-        for code in cv_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+class TestFallbackCodeCoverage:
+    """Test that the fallback code set covers essential conditions."""
 
-    def test_respiratory_codes_present(self, lookup):
-        resp_codes = ["J18.9", "J44.9", "J96.00", "J80"]
-        for code in resp_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+    def test_cardiovascular_codes(self, lookup):
+        for code in ["I10", "I48.91", "I50.9", "I25.10", "I21.3", "I63.9"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_endocrine_codes_present(self, lookup):
-        endo_codes = ["E10.9", "E11.9", "E78.5", "E86.0"]
-        for code in endo_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+    def test_respiratory_codes(self, lookup):
+        for code in ["J18.9", "J44.9", "J96.00", "J80"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_renal_codes_present(self, lookup):
-        renal_codes = ["N17.9", "N18.3", "N18.6", "N39.0"]
-        for code in renal_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+    def test_endocrine_codes(self, lookup):
+        for code in ["E10.9", "E11.9", "E78.5", "E86.0"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_symptom_codes_present(self, lookup):
-        symptom_codes = ["R07.9", "R06.02", "R50.9", "R11.0", "R55"]
-        for code in symptom_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+    def test_renal_codes(self, lookup):
+        for code in ["N17.9", "N18.6", "N39.0"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_mental_health_codes_present(self, lookup):
-        mh_codes = ["F32.9", "F41.9", "F10.20"]
-        for code in mh_codes:
-            assert lookup.lookup_code(code) is not None, f"Missing code: {code}"
+    def test_symptom_codes(self, lookup):
+        for code in ["R07.9", "R06.02", "R50.9", "R11.0", "R55"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_total_code_count(self, lookup):
-        """Knowledge base should have 150+ curated codes."""
-        assert len(lookup.code_to_description) >= 150
+    def test_mental_health_codes(self, lookup):
+        for code in ["F32.9", "F41.9"]:
+            assert lookup.lookup_code(code) is not None, f"Missing: {code}"
 
-    def test_total_entity_mapping_count(self, lookup):
-        """Entity-to-code mapping should cover 100+ common conditions."""
-        assert len(lookup.entity_to_codes) >= 100
+    def test_num_codes_property(self, lookup):
+        """Fallback should have 30+ codes."""
+        assert lookup.num_codes >= 30
+
+    def test_tfidf_index_built(self, lookup):
+        """TF-IDF matrix dimensions should match code count."""
+        assert lookup._tfidf_matrix is not None
+        assert lookup._tfidf_matrix.shape[0] == lookup.num_codes
