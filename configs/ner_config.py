@@ -41,6 +41,7 @@ MODEL_CONFIGS = {
 DATASET_CONFIGS = {
     "ncbi_disease": {
         "hf_name": "ncbi/ncbi_disease",
+        "revision": "refs/convert/parquet",
         "description": "NCBI Disease Corpus - disease name recognition",
         "entity_types": ["Disease"],
         "label_column": "ner_tags",
@@ -48,6 +49,7 @@ DATASET_CONFIGS = {
     },
     "bc5cdr": {
         "hf_name": "tner/bc5cdr",
+        "revision": "refs/convert/parquet",
         "description": "BC5CDR - chemical and disease NER from PubMed articles",
         "entity_types": ["Chemical", "Disease"],
         "label_column": "tags",
@@ -61,7 +63,7 @@ DATASET_CONFIGS = {
         "token_column": "tokens",
     },
     "jnlpba": {
-        "hf_name": "jnlpba",
+        "hf_name": "siddharthtumre/jnlpba-split",
         "description": "JNLPBA - biomedical entity recognition (proteins, DNA, RNA, cell lines, cell types)",
         "entity_types": ["Protein", "DNA", "RNA", "Cell_line", "Cell_type"],
         "label_column": "ner_tags",

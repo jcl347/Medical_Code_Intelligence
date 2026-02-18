@@ -91,15 +91,29 @@ def run_single_experiment(model_key, dataset_key, args):
 
     # Preprocess
     tokenized = preprocess_dataset(dataset, tokenizer, label2id)
-    eval_split = "validation" if "validation" in tokenized else "test"
+
+    # Determine eval split, auto-splitting if needed
+    if "validation" in tokenized:
+        eval_split = "validation"
+        train_ds = tokenized["train"]
+        eval_ds = tokenized[eval_split]
+    elif "test" in tokenized:
+        eval_split = "test"
+        train_ds = tokenized["train"]
+        eval_ds = tokenized[eval_split]
+    else:
+        eval_split = "auto_eval"
+        split = tokenized["train"].train_test_split(test_size=0.1, seed=args.seed)
+        train_ds = split["train"]
+        eval_ds = split["test"]
 
     # Train
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
         config=config,
-        train_dataset=tokenized["train"],
-        eval_dataset=tokenized[eval_split],
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
         label_list=label_list,
     )
     trainer.train()

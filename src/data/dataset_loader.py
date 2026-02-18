@@ -227,8 +227,9 @@ def load_ner_dataset(
         )
 
     hf_name = cfg["hf_name"]
+    revision = cfg.get("revision")
     logger.info("Loading dataset '%s' from HuggingFace Hub (%s)...", dataset_key, hf_name)
-    dataset = load_dataset(hf_name, cache_dir=cache_dir, trust_remote_code=True)
+    dataset = load_dataset(hf_name, cache_dir=cache_dir, revision=revision)
 
     # Apply dataset-specific normalisation
     normaliser = _NORMALISERS.get(dataset_key)
