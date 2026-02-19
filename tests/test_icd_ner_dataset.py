@@ -15,6 +15,9 @@ from src.data.icd_dataset import (
     _clean_garbage_labels,
     _normalize_ncbi_to_diagnosis,
     _normalize_bc5cdr_to_diagnosis,
+    _spans_to_diagnosis_bio,
+    _get_curated_icd_examples,
+    _CURATED_ICD_EXAMPLES,
 )
 from configs.ner_config import DATASET_CONFIGS
 
@@ -296,6 +299,108 @@ class TestGarbageLabelCleaning:
         labels = result["train"][0]["ner_labels"]
         for tag, label in zip(tags, labels):
             assert tag == ICD_NER_LABEL2ID[label]
+
+
+# ---------------------------------------------------------------------------
+# Span-to-BIO conversion for new sources
+# ---------------------------------------------------------------------------
+
+class TestSpansToDiagnosisBIO:
+    """Test _spans_to_diagnosis_bio converts spans to DIAGNOSIS BIO tags."""
+
+    def test_single_disorder_entity(self):
+        text = "Patient has encephalopathy"
+        entities = [{"class": "DISORDER", "start": 12, "end": 26}]
+        tokens, labels = _spans_to_diagnosis_bio(
+            text, entities, frozenset({"DISORDER"}),
+        )
+        assert tokens == ["Patient", "has", "encephalopathy"]
+        assert labels == ["O", "O", "B-DIAGNOSIS"]
+
+    def test_multi_word_entity(self):
+        text = "congestive heart failure diagnosed"
+        entities = [{"class": "DISORDER", "start": 0, "end": 23}]
+        tokens, labels = _spans_to_diagnosis_bio(
+            text, entities, frozenset({"DISORDER"}),
+        )
+        assert labels == ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O"]
+
+    def test_non_target_class_ignored(self):
+        text = "aspirin causes bleeding"
+        entities = [
+            {"class": "CHEMICALS", "start": 0, "end": 7},
+            {"class": "DISORDER", "start": 15, "end": 23},
+        ]
+        tokens, labels = _spans_to_diagnosis_bio(
+            text, entities, frozenset({"DISORDER"}),
+        )
+        assert labels[0] == "O"  # aspirin not tagged
+        assert labels[-1] == "B-DIAGNOSIS"  # bleeding tagged
+
+    def test_phenotype_included(self):
+        text = "has seizure phenotype"
+        entities = [{"class": "PHENOTYPE", "start": 4, "end": 20}]
+        tokens, labels = _spans_to_diagnosis_bio(
+            text, entities, frozenset({"DISORDER", "PHENOTYPE"}),
+        )
+        assert labels == ["O", "B-DIAGNOSIS", "I-DIAGNOSIS"]
+
+    def test_empty_entities(self):
+        text = "normal examination"
+        tokens, labels = _spans_to_diagnosis_bio(
+            text, [], frozenset({"DISORDER"}),
+        )
+        assert all(l == "O" for l in labels)
+
+
+class TestCuratedICDExamples:
+    """Test the curated ICD clinical examples dataset."""
+
+    def test_curated_examples_not_empty(self):
+        assert len(_CURATED_ICD_EXAMPLES) > 50
+
+    def test_curated_examples_have_required_keys(self):
+        for ex in _CURATED_ICD_EXAMPLES:
+            assert "tokens" in ex
+            assert "labels" in ex
+            assert len(ex["tokens"]) == len(ex["labels"])
+
+    def test_curated_labels_are_valid(self):
+        for ex in _CURATED_ICD_EXAMPLES:
+            for label in ex["labels"]:
+                assert label in ICD_NER_LABELS, f"Invalid label: {label}"
+
+    def test_curated_has_positive_examples(self):
+        """At least some curated examples should contain DIAGNOSIS entities."""
+        has_diagnosis = any(
+            "B-DIAGNOSIS" in ex["labels"]
+            for ex in _CURATED_ICD_EXAMPLES
+        )
+        assert has_diagnosis
+
+    def test_curated_has_negative_examples(self):
+        """Some curated examples should be all-O (negative examples)."""
+        has_negative = any(
+            all(l == "O" for l in ex["labels"])
+            for ex in _CURATED_ICD_EXAMPLES
+        )
+        assert has_negative
+
+    def test_curated_dataset_builds(self):
+        ds = _get_curated_icd_examples()
+        assert "train" in ds
+        # 3x repeat of curated examples
+        assert len(ds["train"]) == len(_CURATED_ICD_EXAMPLES) * 3
+
+    def test_curated_bio_consistency(self):
+        """I-DIAGNOSIS should only follow B-DIAGNOSIS or I-DIAGNOSIS."""
+        for ex in _CURATED_ICD_EXAMPLES:
+            labels = ex["labels"]
+            for i, label in enumerate(labels):
+                if label == "I-DIAGNOSIS":
+                    assert i > 0 and labels[i - 1] in ("B-DIAGNOSIS", "I-DIAGNOSIS"), (
+                        f"I-DIAGNOSIS at pos {i} without preceding B/I: {ex['tokens']}"
+                    )
 
 
 # ---------------------------------------------------------------------------

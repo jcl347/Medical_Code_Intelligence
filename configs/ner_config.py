@@ -90,12 +90,17 @@ DATASET_CONFIGS = {
     # ICD-specific and clinical coding datasets
     # -------------------------------------------------------------------
     "icd_ner": {
-        "hf_name": "composite:ncbi_disease+bc5cdr",
+        "hf_name": "composite:ncbi_disease+bc5cdr+biomed_ner+ade_corpus+curated",
         "description": (
-            "ICD-focused composite NER dataset. Combines NCBI Disease "
-            "(6.9K sentences) + BC5CDR disease subset (1.5K abstracts) "
-            "with a unified DIAGNOSIS entity type for training models "
-            "that feed into ICD-10-CM code resolution."
+            "ICD-focused composite NER dataset. Combines five sources with "
+            "a unified DIAGNOSIS entity type:\n"
+            "  1. NCBI Disease (6.9K sentences, PubMed abstracts)\n"
+            "  2. BC5CDR disease subset (1.5K abstracts)\n"
+            "  3. BioMed NER DISORDER entities (clinical case reports)\n"
+            "  4. ADE Corpus V2 adverse drug effects\n"
+            "  5. Curated ICD clinical examples (80+ hand-crafted sentences)\n"
+            "Designed for training models that feed into ICD-10-CM code "
+            "resolution."
         ),
         "entity_types": ["DIAGNOSIS"],
         "format": "composite",
