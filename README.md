@@ -22,7 +22,15 @@ pip install -r requirements.txt
 
 ### Step 2: Train on the ICD NER Dataset
 
-The `icd_ner` dataset combines NCBI Disease (6.9K sentences) + BC5CDR disease subset (1.5K abstracts) into a single corpus with a unified `DIAGNOSIS` entity type. Chemical entities from BC5CDR are filtered out — the model learns only to detect diagnosable conditions.
+The `icd_ner` dataset is a 5-source composite corpus with a unified `DIAGNOSIS` entity type:
+
+1. **NCBI Disease** — 6.9K sentences from PubMed abstracts
+2. **BC5CDR disease subset** — 1.5K abstracts (chemical entities filtered out)
+3. **BioMed NER DISORDER/PHENOTYPE** — clinical case reports from `knowledgator/biomed_NER`
+4. **ADE Corpus V2** — adverse drug effect spans from `ade_corpus_v2`
+5. **Curated ICD examples** — 80+ hand-crafted clinical sentences targeting common FN/FP patterns
+
+Garbage labels (broken BIO annotations from source corpora) are automatically cleaned at load time. The model learns only to detect diagnosable conditions that map to ICD codes.
 
 ```bash
 # Train PubMedBERT on the ICD NER composite dataset
@@ -31,12 +39,15 @@ python scripts/train.py --model pubmedbert --dataset icd_ner
 # Train Bio_ClinicalBERT (pre-trained on MIMIC-III clinical notes)
 python scripts/train.py --model bio_clinicalbert --dataset icd_ner --lr 3e-5
 
+# Train GatorTron (pre-trained on 90B words of clinical text)
+python scripts/train.py --model gatortron-base --dataset icd_ner --lr 3e-5
+
 # Train with CRF layer for structured label decoding
 python scripts/train.py --model pubmedbert --dataset icd_ner --use-crf
 
 # Custom hyperparameters
 python scripts/train.py --model pubmedbert --dataset icd_ner \
-    --epochs 15 --batch-size 32 --lr 3e-5 --patience 3
+    --epochs 15 --batch-size 32 --lr 3e-5 --patience 3 --scheduler cosine
 ```
 
 The model is saved automatically to `outputs/pubmedbert_icd_ner/best_model/` (based on best validation F1).
@@ -209,17 +220,28 @@ expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
 
 ### NER Training Datasets
 
-| Key | Source | Entity Types | Size |
-|-----|--------|-------------|------|
-| **`icd_ner`** | **NCBI Disease + BC5CDR (composite)** | **DIAGNOSIS** | **~8.4K sentences** |
-| `ncbi_disease` | NCBI Disease Corpus | Disease | 6.9K sentences |
-| `bc5cdr` | BioCreative V CDR | Chemical, Disease | 1.5K abstracts |
-| `bc2gm` | BioCreative II GM | Gene | 20K sentences |
-| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | 22K sentences |
-| `biomedical_ner_all` | d4data combined | 10+ entity types | 25K+ samples |
-| `biomed_ner` | knowledgator/biomed_NER | 24 types (DISORDER, CLINICAL_DRUG, ...) | Span-annotated |
+| Key | Source | Entity Types | Status |
+|-----|--------|-------------|--------|
+| **`icd_ner`** | **5-source composite (see below)** | **DIAGNOSIS** | **Recommended** |
+| `ncbi_disease` | NCBI Disease Corpus | Disease | Available |
+| `bc5cdr` | BioCreative V CDR | Chemical, Disease | Available |
+| `bc2gm` | BioCreative II GM | Gene | Available |
+| `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | Available |
+| `biomed_ner` | knowledgator/biomed_NER | 24 types (DISORDER, CLINICAL_DRUG, ...) | Available (span format) |
 
-**`icd_ner`** is the recommended dataset for ICD coding. It merges two well-established disease corpora and normalizes all disease/disorder entities to a single `DIAGNOSIS` label. The model's job is to detect diagnosable conditions; the downstream `ICDCodeLookup` maps extracted text spans to specific ICD-10-CM codes.
+**`icd_ner`** is the recommended dataset for ICD coding. It merges five sources and normalizes all disease/disorder entities to a single `DIAGNOSIS` label:
+
+| # | Source | What it contributes |
+|---|--------|-------------------|
+| 1 | NCBI Disease (6.9K sentences) | Broad disease mention coverage from PubMed |
+| 2 | BC5CDR disease subset (1.5K abstracts) | Chemical-disease relation corpus, disease entities only |
+| 3 | BioMed NER DISORDER/PHENOTYPE | Clinical case reports with disorder and phenotype spans |
+| 4 | ADE Corpus V2 | Adverse drug effect spans (drug reactions as diagnoses) |
+| 5 | Curated ICD examples (80+ sentences) | Hand-crafted examples targeting FN/FP patterns + negative examples |
+
+Garbage labels (broken BIO tags on function words like "of", "and", "the") are automatically cleaned from all sources. The curated examples include negative training data (e.g. "blood pressure", "heart rate", "renal function") to reduce false positives on clinical measurements.
+
+The model's job is to detect diagnosable conditions; the downstream `ICDCodeLookup` maps extracted text spans to specific ICD-10-CM codes.
 
 ### ICD-10-CM Code Lookup Datasets
 
@@ -232,6 +254,8 @@ expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
 ### Why No OASIS Dataset?
 
 CMS publishes aggregate OASIS (Outcome and Assessment Information Set) statistics, but the underlying clinical text with span-level ICD annotations is not publicly released. The `icd_ner` composite dataset fills this gap using the best publicly available disease NER corpora.
+
+> **Note:** `d4data/biomedical-ner-all` (`biomedical_ner_all`) has been removed from HuggingFace and is no longer available for training.
 
 ## Supported Models
 
@@ -276,6 +300,7 @@ Medical_Code_Intelligence/
 │   │   ├── metrics.py             # Entity-level F1 (seqeval)
 │   │   └── error_analysis.py      # Boundary/type/FP/FN analysis
 │   └── inference/
+│       ├── entity_utils.py        # Entity post-processing (stopword filter, merge)
 │       └── predictor.py           # Inference with batching
 ├── scripts/
 │   ├── train.py                   # Training CLI
@@ -314,13 +339,17 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 
 **TF-IDF for entity linking**: Character n-grams outperform word-level TF-IDF for medical terms. Scales to 50K+ codes without GPU. Deterministic and interpretable.
 
-**Composite ICD NER dataset**: Merging NCBI Disease + BC5CDR gives broader disease coverage than either alone. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
+**Composite ICD NER dataset**: Merging five sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, and curated clinical examples) gives broad coverage of diagnosable conditions. Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
 
 ## Public Data Sources
 
 | Component | Dataset | License | Records |
 |-----------|---------|---------|---------|
-| ICD NER training | NCBI Disease + BC5CDR (composite) | CC BY 4.0 / Public domain | ~8.4K sentences |
+| ICD NER training | NCBI Disease (ncbi/ncbi_disease) | Public domain | 6.9K sentences |
+| ICD NER training | BC5CDR (tner/bc5cdr) | CC BY 4.0 | 1.5K abstracts |
+| ICD NER training | BioMed NER (knowledgator/biomed_NER) | Apache 2.0 | 500 case reports |
+| ICD NER training | ADE Corpus V2 (ade_corpus_v2) | Public domain | Drug-effect spans |
+| ICD NER training | Curated ICD examples | Project-internal | 80+ sentences |
 | ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
 | Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
