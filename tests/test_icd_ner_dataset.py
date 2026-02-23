@@ -389,8 +389,10 @@ class TestCuratedICDExamples:
     def test_curated_dataset_builds(self):
         ds = _get_curated_icd_examples()
         assert "train" in ds
-        # 3x repeat of curated examples
-        assert len(ds["train"]) == len(_CURATED_ICD_EXAMPLES) * 3
+        # 3x repeat of hand-crafted + template-generated examples
+        from src.data.icd_dataset import _generate_template_examples
+        total_examples = len(_CURATED_ICD_EXAMPLES) + len(_generate_template_examples())
+        assert len(ds["train"]) == total_examples * 3
 
     def test_curated_bio_consistency(self):
         """I-DIAGNOSIS should only follow B-DIAGNOSIS or I-DIAGNOSIS."""

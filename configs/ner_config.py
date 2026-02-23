@@ -207,6 +207,13 @@ class NERConfig:
     # --- CRF layer (optional, can boost NER performance) ---
     use_crf: bool = False
 
+    # --- Adversarial training (FGM/PGD on embeddings) ---
+    use_adversarial_training: bool = False
+    adv_method: str = "fgm"             # "fgm" (~2x cost) or "pgd" (~4x cost)
+    adv_epsilon: Optional[float] = None  # perturbation norm (default: 1.0 FGM, 0.3 PGD)
+    pgd_alpha: float = 0.1              # PGD step size
+    pgd_steps: int = 3                  # PGD iterations
+
     # --- Label smoothing ---
     label_smoothing_factor: float = 0.0
 
@@ -224,6 +231,10 @@ class NERConfig:
     expand_shorthand: bool = True
     detect_negation: bool = True
     negation_scope_window: int = 6
+
+    # --- MS-DRG cost scoping ---
+    resolve_drg: bool = False
+    drg_base_rate: float = 6752.61       # FY 2026 national standardized amount
 
     # --- Experiment tracking ---
     use_wandb: bool = False

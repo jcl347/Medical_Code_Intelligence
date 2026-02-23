@@ -95,6 +95,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-steps", type=int, default=200, help="Evaluate every N steps")
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
 
+    # Adversarial training
+    parser.add_argument(
+        "--adversarial", action="store_true",
+        help="Enable adversarial training (FGM/PGD on embeddings) for +0.5-1.5%% F1",
+    )
+    parser.add_argument(
+        "--adv-method", type=str, default="fgm", choices=["fgm", "pgd"],
+        help="Adversarial method: fgm (~2x cost) or pgd (~4x cost)",
+    )
+    parser.add_argument(
+        "--adv-epsilon", type=float, default=None,
+        help="Adversarial perturbation magnitude (default: 1.0 for FGM, 0.3 for PGD)",
+    )
+
     return parser.parse_args()
 
 
@@ -124,6 +138,9 @@ def main():
         save_steps=args.eval_steps,
         seed=args.seed,
         use_wandb=args.wandb,
+        use_adversarial_training=args.adversarial,
+        adv_method=args.adv_method,
+        adv_epsilon=args.adv_epsilon,
     )
 
     logger.info("=" * 60)

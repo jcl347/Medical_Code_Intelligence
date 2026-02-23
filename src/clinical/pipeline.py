@@ -34,6 +34,7 @@ class MedicalEntity:
     original_text: Optional[str] = None  # before shorthand expansion
     expanded_from: Optional[str] = None  # abbreviation that was expanded
     icd_codes: Optional[List[Dict]] = None  # ICD-10-CM matches
+    drg_info: Optional[Dict] = None       # MS-DRG assignment + cost estimate
 
     def to_dict(self) -> Dict:
         d = {
@@ -51,6 +52,8 @@ class MedicalEntity:
             d["original_text"] = self.original_text
         if self.icd_codes:
             d["icd_codes"] = self.icd_codes
+        if self.drg_info:
+            d["drg"] = self.drg_info
         return d
 
     @property
@@ -95,6 +98,11 @@ class MedicalCodingPipeline:
         Whether to resolve entities to ICD-10-CM codes via TF-IDF matching.
     icd_top_k : int
         Number of ICD candidate codes to return per entity.
+    resolve_drg : bool
+        Whether to map ICD codes to MS-DRGs for cost estimation.
+    drg_base_rate : float
+        National standardized amount for DRG payment estimation.
+        Default is FY 2026 ($6,752.61).
     device : str, optional
         Torch device. Auto-detected if None.
     custom_abbreviations : dict, optional
@@ -111,6 +119,8 @@ class MedicalCodingPipeline:
         negation_strategy: str = "rules",
         resolve_icd_codes: bool = False,
         icd_top_k: int = 3,
+        resolve_drg: bool = False,
+        drg_base_rate: float = 6752.61,
         device: Optional[str] = None,
         custom_abbreviations: Optional[Dict[str, str]] = None,
         negation_scope_window: int = 6,
@@ -147,6 +157,12 @@ class MedicalCodingPipeline:
         if resolve_icd_codes:
             from src.clinical.icd_codes import ICDCodeLookup
             self.icd_lookup = ICDCodeLookup()
+
+        # MS-DRG cost estimation
+        self.drg_estimator = None
+        if resolve_drg:
+            from src.clinical.drg_costs import DRGCostEstimator
+            self.drg_estimator = DRGCostEstimator(base_rate=drg_base_rate)
 
         # NER predictor (lazy-loaded if model_path given)
         self._predictor = None
@@ -254,6 +270,25 @@ class MedicalCodingPipeline:
                     entity.text, top_k=self._icd_top_k,
                 )
                 entity.icd_codes = [m.to_dict() for m in matches]
+
+        # Step 6: MS-DRG cost estimation
+        if self.drg_estimator is not None and results:
+            # Collect ICD codes from all affirmed entities for DRG grouping
+            dx_codes = []
+            for entity in results:
+                if entity.icd_codes and entity.is_affirmed:
+                    top_code = entity.icd_codes[0].get("code", "")
+                    if top_code:
+                        dx_codes.append(top_code)
+            if dx_codes:
+                analysis = self.drg_estimator.analyze_cost_impact(dx_codes)
+                if analysis is not None:
+                    drg_dict = analysis.to_dict()
+                    # Attach DRG info to the first affirmed entity (primary dx)
+                    for entity in results:
+                        if entity.is_affirmed:
+                            entity.drg_info = drg_dict
+                            break
 
         return results
 

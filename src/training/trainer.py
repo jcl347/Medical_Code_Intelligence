@@ -128,16 +128,38 @@ def build_trainer(
             )
         )
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        callbacks=callbacks,
-    )
+    # Use adversarial trainer if configured
+    if config.use_adversarial_training:
+        from src.training.adversarial import AdversarialTrainer
+        trainer = AdversarialTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics,
+            callbacks=callbacks,
+            adv_method=config.adv_method,
+            adv_epsilon=config.adv_epsilon,
+            pgd_alpha=config.pgd_alpha,
+            pgd_steps=config.pgd_steps,
+        )
+        logger.info(
+            "Adversarial trainer built (%s). Output dir: %s",
+            config.adv_method.upper(), training_args.output_dir,
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics,
+            callbacks=callbacks,
+        )
+        logger.info("Trainer built. Output dir: %s", training_args.output_dir)
 
-    logger.info("Trainer built. Output dir: %s", training_args.output_dir)
     return trainer
