@@ -372,6 +372,308 @@ Medical_Code_Intelligence/
 └── setup.py
 ```
 
+## Command Reference
+
+### `scripts/train.py` — Train a Biomedical NER Model
+
+Trains a transformer-based NER model on any supported dataset. Handles dataset loading, tokenization, subword label alignment, training with early stopping, and saves the best model checkpoint automatically.
+
+```bash
+python scripts/train.py [OPTIONS]
+```
+
+**Model selection:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model <key>` | `pubmedbert` | Pre-trained model key. Choices: `pubmedbert`, `biobert`, `bio_clinicalbert`, `scibert`, `gatortron-base`. Each key maps to a HuggingFace model ID (see Supported Models table). |
+| `--model-path <path>` | None | Override `--model` with any HuggingFace model ID or local path to a pre-trained model directory. Use this for custom models not in the built-in list. |
+| `--use-crf` | off | Add a linear-chain CRF (Conditional Random Field) layer on top of the transformer. Enforces valid BIO transitions during decoding (e.g., I-DIAGNOSIS can only follow B-DIAGNOSIS). Adds ~5% training time. |
+
+**Dataset selection:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dataset <key>` | `ncbi_disease` | Dataset to train on. Choices: `icd_ner`, `ncbi_disease`, `bc5cdr`, `bc2gm`, `jnlpba`, `biomed_ner`. Use `icd_ner` for the 7-source composite ICD coding dataset. |
+| `--max-length <int>` | `512` | Maximum token sequence length after subword tokenization. Sequences longer than this are truncated. Reduce to 256 for faster training or if GPU memory is limited. |
+
+**Training hyperparameters:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--epochs <int>` | `20` | Maximum number of training epochs. Training may stop earlier if early stopping triggers. |
+| `--batch-size <int>` | `16` | Per-device training batch size. Effective batch size = `batch-size * grad-accum * num_gpus`. Reduce to 8 for GatorTron or other large models if OOM. |
+| `--lr <float>` | `5e-5` | Peak learning rate. Bio-domain models typically work well with 3e-5 to 5e-5. Lower values (2e-5) can help if training is unstable. |
+| `--weight-decay <float>` | `0.01` | L2 weight decay regularization applied to all parameters except biases and layer norms. |
+| `--warmup-ratio <float>` | `0.1` | Fraction of total training steps used for linear learning rate warmup. 0.1 means the first 10% of steps ramp from 0 to the peak LR. |
+| `--grad-accum <int>` | `1` | Gradient accumulation steps. Simulates larger batch sizes without more GPU memory. Setting `--batch-size 8 --grad-accum 2` is equivalent to batch size 16. |
+| `--patience <int>` | `5` | Early stopping patience. Training stops if validation entity-level F1 doesn't improve for this many evaluation rounds. |
+| `--label-smoothing <float>` | `0.0` | Label smoothing factor (0.0-1.0). Redistributes a fraction of the target probability to non-target classes. Values of 0.05-0.1 can reduce overfitting. |
+| `--scheduler <type>` | `linear` | Learning rate scheduler. `linear`: linear decay after warmup. `cosine`: cosine annealing. `constant_with_warmup`: constant LR after warmup period. |
+
+**Adversarial training:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--adversarial` | off | Enable adversarial training on the word embedding layer. During each training step, the embeddings are perturbed in the direction that maximizes the loss, and the model also trains on these adversarial examples. Improves robustness and F1 by +0.5-1.5%. |
+| `--adv-method <method>` | `fgm` | Adversarial method. `fgm` (Fast Gradient Method): single-step perturbation, ~2x training time. `pgd` (Projected Gradient Descent): multi-step perturbation with projection back to epsilon-ball, ~4x training time, slightly stronger. |
+| `--adv-epsilon <float>` | auto | Perturbation magnitude (L2 norm). Controls how far the adversarial example can deviate from the original embedding. Default: 1.0 for FGM, 0.3 for PGD. Larger values = stronger perturbation but risk training instability. |
+
+**Output and misc:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output-dir <path>` | `outputs` | Root output directory. Model checkpoints save to `<output-dir>/<model>_<dataset>/best_model/`. |
+| `--seed <int>` | `42` | Random seed for reproducibility. Controls dataset shuffling, weight initialization, and dropout. |
+| `--fp16` | on | Enable mixed-precision (FP16) training. Roughly halves GPU memory usage and doubles throughput on compatible GPUs. Enabled by default when CUDA is available. |
+| `--no-fp16` | off | Force disable mixed-precision training. Use if you encounter NaN losses or are training on CPU. |
+| `--eval-steps <int>` | `200` | Evaluate on the validation set every N training steps. Also controls checkpoint saving frequency. Lower values give earlier stopping detection but add overhead. |
+| `--wandb` | off | Enable Weights & Biases experiment tracking. Requires `wandb` package and login. Logs loss curves, learning rates, and evaluation metrics. |
+
+**Examples:**
+
+```bash
+# Minimal: train PubMedBERT on ICD NER with all defaults
+python scripts/train.py --model pubmedbert --dataset icd_ner
+
+# Clinical model with tuned hyperparameters
+python scripts/train.py --model bio_clinicalbert --dataset icd_ner \
+    --lr 3e-5 --epochs 15 --patience 3 --scheduler cosine
+
+# GatorTron with reduced batch size (345M params needs more memory)
+python scripts/train.py --model gatortron-base --dataset icd_ner \
+    --batch-size 8 --grad-accum 2 --lr 3e-5
+
+# Adversarial training with CRF layer
+python scripts/train.py --model pubmedbert --dataset icd_ner \
+    --adversarial --adv-method fgm --use-crf
+
+# PGD adversarial with custom epsilon and label smoothing
+python scripts/train.py --model pubmedbert --dataset icd_ner \
+    --adversarial --adv-method pgd --adv-epsilon 0.5 --label-smoothing 0.05
+```
+
+---
+
+### `scripts/predict.py` — Run NER Predictions
+
+Runs the full pipeline (shorthand expansion, NER, negation detection, ICD resolution) on clinical text. Supports three modes: single text, batch file, and interactive REPL.
+
+```bash
+python scripts/predict.py --model-path <path> [OPTIONS]
+```
+
+**Required:**
+
+| Flag | Description |
+|------|-------------|
+| `--model-path <path>` | Path to a fine-tuned model directory (must contain `config.json` and model weights). This is the directory saved by `train.py`, e.g., `outputs/pubmedbert_icd_ner/best_model`. Not a model key — it's a local filesystem path or HuggingFace model ID with saved weights. |
+
+**Input mode (pick one, or omit all for interactive):**
+
+| Flag | Description |
+|------|-------------|
+| `--text "<string>"` | Process a single clinical text string and print results. Wrap in quotes if the text contains spaces or special characters. |
+| `--input-file <path>` | Process a file with one clinical sentence per line. Each line is processed independently through the full pipeline. |
+| *(neither)* | Starts interactive mode — a REPL where you type clinical text and see results. Type `quit` to exit. |
+
+**Output:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output-file <path>` | None | Save batch results to a JSON file. Each entry contains the input text and a list of extracted entities with all annotations. Only used with `--input-file`. |
+
+**Pipeline features:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-shorthand` | off | Disable physician shorthand expansion. By default, abbreviations like "cp", "sob", "htn" are expanded to their full forms before NER. Disable this if your input text is already in standard medical terminology. |
+| `--no-negation` | off | Disable negation/assertion detection. By default, entities are annotated with assertion status (affirmed, negated, possible, historical, etc.). Disable to skip this step and treat all entities as affirmed. |
+| `--icd-codes` | off | Enable ICD-10-CM code resolution. Each extracted entity is matched against 51K ICD-10-CM codes using TF-IDF character n-gram similarity. The top-k candidate codes are attached to each entity. |
+| `--icd-top-k <int>` | `3` | Number of ICD-10-CM candidate codes to return per entity. Higher values give more options but may include lower-quality matches. |
+| `--device <device>` | auto | Force a specific device (`cpu`, `cuda`, `cuda:0`, etc.). Auto-detects CUDA availability by default. |
+
+**Examples:**
+
+```bash
+# Single text with full pipeline
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --text "Pt denies cp or sob. Hx of dm2 and htn."
+
+# Single text with ICD code resolution
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --text "Pt denies cp or sob. Hx of dm2 and htn." \
+    --icd-codes
+
+# Batch processing with JSON output
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --input-file data/clinical_notes.txt \
+    --output-file results.json \
+    --icd-codes --icd-top-k 5
+
+# Interactive mode (no --text, no --input-file)
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --icd-codes
+
+# Skip shorthand expansion (input is already in standard terminology)
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --text "Patient has congestive heart failure and diabetes." \
+    --no-shorthand
+
+# NER only, no negation detection
+python scripts/predict.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --text "No evidence of pneumonia." \
+    --no-negation
+```
+
+**Output format:**
+
+Each entity is displayed as `[entity text](label, STATUS, details)`:
+```
+Pt denies cp or sob. Hx of dm2 and htn.
+
+  [chest pain](DIAGNOSIS, NEGATED, trigger="denies", from="cp", ICD=R07.9, score=0.950)
+  [shortness of breath](DIAGNOSIS, NEGATED, trigger="denies", from="sob", ICD=R06.02, score=0.930)
+  [type 2 diabetes mellitus](DIAGNOSIS, HISTORICAL, trigger="hx", from="dm2", ICD=E11.9, score=0.970)
+  [hypertension](DIAGNOSIS, HISTORICAL, trigger="hx", from="htn", ICD=I10, score=0.960)
+```
+
+Fields: entity label, assertion status (AFFIRMED/NEGATED/POSSIBLE/HISTORICAL/HYPOTHETICAL/FAMILY), negation trigger word, abbreviation it was expanded from, best ICD-10-CM code, model confidence score.
+
+---
+
+### `scripts/evaluate.py` — Evaluate a Trained Model
+
+Computes entity-level precision, recall, and F1 on a dataset split. Optionally runs detailed error analysis that categorizes mistakes into boundary errors, type errors, false positives, and false negatives.
+
+```bash
+python scripts/evaluate.py --model-path <path> [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model-path <path>` | *(required)* | Path to a fine-tuned model directory (same as `predict.py`). |
+| `--dataset <key>` | `ncbi_disease` | Dataset to evaluate on. The model's predictions are compared against the gold-standard labels from this dataset. Use the same dataset the model was trained on, or a different one for cross-dataset evaluation. |
+| `--split <name>` | `test` | Dataset split to evaluate. Choices: `train`, `validation`, `test`. Falls back to the last available split if the requested one doesn't exist. |
+| `--batch-size <int>` | `32` | Evaluation batch size. Can be larger than training batch size since no gradients are stored. Increase for faster evaluation if GPU memory allows. |
+| `--max-length <int>` | `512` | Maximum sequence length for tokenization. Should match the value used during training. |
+| `--error-analysis` | off | Run detailed error analysis after evaluation. Categorizes every prediction mistake: **boundary errors** (entity detected but wrong span), **type errors** (right span, wrong label), **false positives** (predicted entity that doesn't exist in gold), **false negatives** (gold entity that the model missed). Prints a report with example tokens for each error type. |
+| `--output-file <path>` | None | Save evaluation metrics (precision, recall, F1) to a JSON file. |
+
+**Examples:**
+
+```bash
+# Basic evaluation on test set
+python scripts/evaluate.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset icd_ner
+
+# Evaluate on validation set with error analysis
+python scripts/evaluate.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset icd_ner --split validation --error-analysis
+
+# Cross-dataset evaluation (train on icd_ner, evaluate on ncbi_disease)
+python scripts/evaluate.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset ncbi_disease
+
+# Save metrics to file
+python scripts/evaluate.py \
+    --model-path outputs/pubmedbert_icd_ner/best_model \
+    --dataset icd_ner --output-file eval_results.json
+```
+
+---
+
+### `scripts/benchmark.py` — Compare Models Across Datasets
+
+Trains and evaluates every combination of the specified models and datasets. Produces a comparison table and saves results to JSON. Useful for model selection and dataset ablation studies.
+
+```bash
+python scripts/benchmark.py [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--models <key> [key ...]` | `pubmedbert biobert bio_clinicalbert` | Space-separated list of model keys to benchmark. Each model is trained from scratch on each dataset. |
+| `--datasets <key> [key ...]` | `ncbi_disease bc5cdr jnlpba` | Space-separated list of dataset keys. Total experiments = `len(models) * len(datasets)`. |
+| `--epochs <int>` | `10` | Training epochs per experiment. Use fewer (3-5) for quick comparisons. |
+| `--batch-size <int>` | `16` | Per-device batch size for all experiments. |
+| `--lr <float>` | `5e-5` | Learning rate for all experiments. |
+| `--eval-steps <int>` | `200` | Evaluation frequency (steps). |
+| `--patience <int>` | `5` | Early stopping patience. |
+| `--output-dir <path>` | `outputs/benchmark` | Directory for checkpoints and the results JSON file. |
+| `--seed <int>` | `42` | Random seed (same for all experiments for fair comparison). |
+
+**Examples:**
+
+```bash
+# Full benchmark: 3 models x 3 datasets = 9 experiments
+python scripts/benchmark.py \
+    --models pubmedbert biobert bio_clinicalbert \
+    --datasets icd_ner ncbi_disease bc5cdr
+
+# Quick comparison with fewer epochs
+python scripts/benchmark.py \
+    --models pubmedbert bio_clinicalbert \
+    --datasets icd_ner \
+    --epochs 3 --eval-steps 50
+
+# Include GatorTron (will need reduced batch size manually if OOM)
+python scripts/benchmark.py \
+    --models pubmedbert gatortron-base \
+    --datasets icd_ner ncbi_disease \
+    --batch-size 8
+
+# Single model ablation across all disease datasets
+python scripts/benchmark.py \
+    --models pubmedbert \
+    --datasets icd_ner ncbi_disease bc5cdr
+```
+
+**Output:** Prints a summary table at the end and saves a timestamped JSON file:
+
+```
+================================================================================
+BENCHMARK RESULTS
+================================================================================
+Model                Dataset            Precision    Recall        F1
+--------------------------------------------------------------------------------
+pubmedbert           icd_ner              0.8912    0.8745    0.8828
+pubmedbert           ncbi_disease         0.8734    0.8521    0.8626
+biobert              icd_ner              0.8856    0.8690    0.8772
+...
+
+Results saved to: outputs/benchmark/benchmark_20260223_143052.json
+```
+
+---
+
+### `python -m pytest` — Run Tests
+
+```bash
+# Run the full test suite (270 tests, ~25 seconds on CPU)
+python -m pytest tests/ -v
+
+# Run a specific test file
+python -m pytest tests/test_negation.py -v
+
+# Run with coverage report
+python -m pytest tests/ --cov=src --cov-report=term-missing
+
+# Run only tests matching a pattern
+python -m pytest tests/ -v -k "test_curated"
+```
+
+All tests use mocked models and built-in fallback data — no GPU, network access, or downloaded models required.
+
 ## Adversarial Training
 
 FGM (Fast Gradient Method) and PGD (Projected Gradient Descent) adversarial training on word embeddings, implemented in `src/training/adversarial.py`. Perturbs the embedding layer in the direction of the loss gradient, then trains on both clean and perturbed inputs. This regularizes the model against small input variations without any architecture changes.
