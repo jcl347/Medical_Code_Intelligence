@@ -48,6 +48,9 @@ scripts/
 configs/
   ner_config.py      MODEL_CONFIGS, DATASET_CONFIGS, NERConfig dataclass
 
+notebooks/
+  demo_all_components.ipynb  Interactive demo of all pipeline components (runs on CPU)
+
 tests/               12 test files, ~2,900 lines total
 ```
 
@@ -238,6 +241,37 @@ Key test files:
 - Docstrings follow NumPy style
 - Config uses Python dataclasses (not YAML/JSON)
 - pytest config is in `pyproject.toml` (testpaths, addopts)
+
+## Notebooks
+
+The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively. It runs entirely on CPU using built-in fallback data (no GPU, no network downloads).
+
+### Keeping the Notebook Up to Date
+
+When making changes to the repository, update the notebook to reflect those changes:
+
+- **New pipeline component**: Add a new section (markdown header + code cells) demonstrating the component's constructor, key methods, and example output. Follow the existing pattern: import, instantiate with offline-friendly defaults, show 2-3 usage examples.
+- **Changed API signature**: Update the relevant code cells to match the new parameters. Search the notebook for the class/function name.
+- **New configuration option in `NERConfig`**: Add it to the config display cell (Section 1) and, if user-facing, to the custom config example.
+- **New dataset source**: Mention it in Section 8 (Curated ICD Dataset) or add a new cell if it requires distinct loading logic.
+- **New CLI flag**: Update the CLI reference cell (Section 12).
+- **New test file**: Add it to the test reference cell (Section 13).
+- **Removed or renamed module**: Remove or rename the corresponding notebook section and update all imports.
+
+After editing the notebook, verify it runs cleanly:
+```bash
+cd notebooks && jupyter nbconvert --to notebook --execute demo_all_components.ipynb --output /dev/null
+```
+
+### Keeping the README Up to Date
+
+When making changes to the repository, update `README.md` to reflect those changes:
+
+- **New pipeline component**: Add it to the "Project Structure" tree, add a Python API usage example under the appropriate section, and update the pipeline flow diagram if it adds a new stage.
+- **New CLI flag**: Add it to the relevant script's flag table in the Command Reference section.
+- **New model or dataset**: Add a row to the Supported Models or Available Datasets table.
+- **Changed default hyperparameters**: Update the Quick Commands examples and any affected API examples.
+- **New data source for `icd_ner`**: Add a row to the ICD NER Composite Dataset table and increment the source count.
 
 ## Common Pitfalls
 

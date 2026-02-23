@@ -327,12 +327,22 @@ CMS publishes aggregate OASIS (Outcome and Assessment Information Set) statistic
 
 For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are recommended starting points.
 
+## Interactive Notebook
+
+`notebooks/demo_all_components.ipynb` demonstrates every pipeline component interactively — shorthand expansion, negation detection, ICD-10-CM linking, DRG cost estimation, entity post-processing, evaluation metrics, adversarial training, and the full end-to-end pipeline. All cells run on CPU using built-in fallback data (no GPU or network required).
+
+```bash
+cd notebooks && jupyter notebook demo_all_components.ipynb
+```
+
 ## Project Structure
 
 ```
 Medical_Code_Intelligence/
 ├── configs/
 │   └── ner_config.py              # Model, dataset, and training configs
+├── notebooks/
+│   └── demo_all_components.ipynb  # Interactive demo of all pipeline components
 ├── src/
 │   ├── clinical/
 │   │   ├── pipeline.py            # Unified pipeline: NER → negation → ICD → DRG
