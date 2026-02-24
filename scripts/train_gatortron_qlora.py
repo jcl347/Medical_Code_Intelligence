@@ -55,12 +55,14 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Model
+    # Model — accepts both config keys and HuggingFace model IDs
     parser.add_argument(
         "--model", type=str, default="UFNLP/gatortron-base",
         help=(
-            "HuggingFace model ID or local path. "
-            "Default: UFNLP/gatortron-base (345M params)"
+            "HuggingFace model ID, local path, or config key. "
+            "Supports shorthand keys: gatortron-base (345M), "
+            "gatortron-medium (~1B), gatortron-large (~3.9B). "
+            "Default: UFNLP/gatortron-base"
         ),
     )
 
@@ -146,6 +148,12 @@ def main():
             "CUDA not available. 4-bit quantization requires a GPU. "
             "Use --no-4bit for CPU-only LoRA training (much slower)."
         )
+
+    # Resolve model key to HuggingFace ID if a config key was provided
+    if args.model in MODEL_CONFIGS:
+        resolved = MODEL_CONFIGS[args.model]["model_name"]
+        logger.info("Resolved model key '%s' -> '%s'", args.model, resolved)
+        args.model = resolved
 
     set_seed(args.seed)
 
