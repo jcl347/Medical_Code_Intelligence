@@ -191,11 +191,42 @@ class DRGCostEstimator:
 
         Returns an analysis showing the current DRG, all available
         severity variants, and the revenue at risk from undercoding.
+
+        Requires drgpy for ICD-to-DRG grouping. Use ``analyze_drg_family``
+        to analyse a known DRG code directly (no grouper needed).
         """
         current = self.get_drg(diagnosis_codes, procedure_codes, gender, is_alive)
         if current is None:
             return None
 
+        return self._build_family_analysis(current)
+
+    def analyze_drg_family(self, drg_code: str) -> Optional[CostImpactAnalysis]:
+        """
+        Analyse severity-tier variants for a known DRG code.
+
+        Unlike ``analyze_cost_impact`` this does **not** require drgpy
+        because no ICD-to-DRG grouping is performed — the DRG code is
+        provided directly.
+
+        Parameters
+        ----------
+        drg_code : str
+            MS-DRG code (e.g. ``"292"``).
+
+        Returns
+        -------
+        CostImpactAnalysis or None
+            ``None`` if the DRG code is not in the weight table.
+        """
+        current = self._build_result(drg_code)
+        if current is None:
+            return None
+
+        return self._build_family_analysis(current)
+
+    def _build_family_analysis(self, current: DRGResult) -> CostImpactAnalysis:
+        """Build a CostImpactAnalysis by comparing *current* against its family."""
         analysis = CostImpactAnalysis(current_drg=current)
         variants = self._find_drg_family(current.drg_code)
 
