@@ -350,6 +350,31 @@ class MedicalCodingPipeline:
                 expanded_from=expanded_from,
             ))
 
+        # ICD-10-CM code resolution
+        if self.icd_lookup is not None:
+            for entity in results:
+                matches = self.icd_lookup.match_entity(
+                    entity.text, top_k=self._icd_top_k,
+                )
+                entity.icd_codes = [m.to_dict() for m in matches]
+
+        # MS-DRG cost estimation
+        if self.drg_estimator is not None and results:
+            dx_codes = []
+            for entity in results:
+                if entity.icd_codes and entity.is_affirmed:
+                    top_code = entity.icd_codes[0].get("code", "")
+                    if top_code:
+                        dx_codes.append(top_code)
+            if dx_codes:
+                analysis = self.drg_estimator.analyze_cost_impact(dx_codes)
+                if analysis is not None:
+                    drg_dict = analysis.to_dict()
+                    for entity in results:
+                        if entity.is_affirmed:
+                            entity.drg_info = drg_dict
+                            break
+
         return results
 
     def process_batch(self, texts: List[str]) -> List[List[MedicalEntity]]:
