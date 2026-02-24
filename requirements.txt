@@ -23,5 +23,8 @@ matplotlib>=3.7.0
 pytest>=7.4.0
 pytest-cov>=4.1.0
 
+# Clinical coding
+drgpy>=0.3.0
+
 # Optional: wandb for experiment tracking
 # wandb>=0.16.0
