@@ -109,6 +109,32 @@ def parse_args() -> argparse.Namespace:
         help="Adversarial perturbation magnitude (default: 1.0 for FGM, 0.3 for PGD)",
     )
 
+    # LoRA / QLoRA
+    parser.add_argument(
+        "--lora", action="store_true",
+        help="Enable LoRA adapters (trains ~0.5%% of params, good for GatorTron)",
+    )
+    parser.add_argument(
+        "--qlora", action="store_true",
+        help="Enable QLoRA (4-bit quantization + LoRA, for memory-constrained GPUs)",
+    )
+    parser.add_argument(
+        "--lora-r", type=int, default=16,
+        help="LoRA rank (higher = more capacity)",
+    )
+    parser.add_argument(
+        "--lora-alpha", type=int, default=16,
+        help="LoRA scaling factor",
+    )
+    parser.add_argument(
+        "--lora-dropout", type=float, default=0.1,
+        help="LoRA dropout rate",
+    )
+    parser.add_argument(
+        "--lora-targets", type=str, default="query,key,value",
+        help="Comma-separated attention modules to apply LoRA to",
+    )
+
     return parser.parse_args()
 
 
@@ -133,6 +159,12 @@ def main():
         lr_scheduler_type=args.scheduler,
         fp16=args.fp16 and not args.no_fp16 and torch.cuda.is_available(),
         use_crf=args.use_crf,
+        use_lora=args.lora or args.qlora,
+        use_qlora=args.qlora,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        lora_target_modules=args.lora_targets,
         output_dir=args.output_dir,
         eval_steps=args.eval_steps,
         save_steps=args.eval_steps,
@@ -159,10 +191,18 @@ def main():
     logger.info("Labels (%d): %s", len(label_list), label_list)
 
     # 2. Build model and tokenizer
+    lora_targets = config.lora_target_modules.split(",") if isinstance(
+        config.lora_target_modules, str) else config.lora_target_modules
     model, tokenizer = build_ner_model(
         config.model_name_or_path,
         label_list,
         use_crf=config.use_crf,
+        use_lora=config.use_lora,
+        use_qlora=config.use_qlora,
+        lora_r=config.lora_r,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        lora_target_modules=lora_targets,
     )
 
     # 3. Preprocess dataset

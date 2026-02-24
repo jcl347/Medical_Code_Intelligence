@@ -195,9 +195,10 @@ for r in results:
 from src.clinical.drg_costs import DRGCostEstimator
 
 # Maps ICD-10-CM codes to MS-DRGs and estimates financial impact
-# Requires drgpy for grouper logic: pip install drgpy
-# Falls back to built-in weights for 32 common DRGs without drgpy
+# Uses drgpy for both ICD→DRG grouping and complete DRG catalog (767 DRGs)
+# Optional: load CMS Table 5 for accurate per-DRG relative weights
 estimator = DRGCostEstimator()
+print(f"DRGs available: {estimator.num_drgs}")  # 767 from drgpy
 
 # Assign DRG and estimate cost
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])
@@ -709,6 +710,35 @@ python scripts/train.py --model pubmedbert --dataset icd_ner \
 
 Based on: RanAT4BIE (2025), FreeLB (ICLR 2020), Miyato et al. (2017).
 
+## LoRA / QLoRA — Parameter-Efficient Fine-Tuning
+
+Fine-tune large models like **GatorTron** (345M params) with LoRA/QLoRA, training only ~0.5% of parameters while matching full fine-tuning performance. Uses the [PEFT](https://github.com/huggingface/peft) library.
+
+| Method | Trainable Params | Memory Savings | GPU Required | Config |
+|--------|-----------------|----------------|--------------|--------|
+| Full fine-tuning | 100% (~345M) | None | 16GB+ VRAM | default |
+| **LoRA** | ~0.5% (~1.8M) | ~70% | CPU or GPU | `--lora` |
+| **QLoRA** | ~0.5% (~1.8M) | ~87.5% | CUDA GPU | `--qlora` |
+
+```bash
+# LoRA (recommended — works on CPU or GPU)
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lr 1e-3
+
+# QLoRA (4-bit quantization — requires CUDA GPU + bitsandbytes)
+python scripts/train.py --model gatortron-base --dataset icd_ner --qlora --lr 1e-3
+
+# Custom LoRA rank and alpha
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora \
+    --lora-r 32 --lora-alpha 32 --lr 1e-3
+```
+
+**Key details:**
+- LoRA adapters are applied to attention projections (`query`, `key`, `value`)
+- The NER classification head trains in full precision (`modules_to_save=["classifier"]`)
+- Uses a higher learning rate (1e-3) than full fine-tuning (5e-5)
+- CRF and LoRA/QLoRA are mutually exclusive
+- Requires: `peft>=0.6.0` (included). QLoRA also needs: `bitsandbytes>=0.41.0` (optional)
+
 ## MS-DRG Cost Estimation
 
 The `DRGCostEstimator` (`src/clinical/drg_costs.py`) maps ICD-10-CM codes to Medicare Severity Diagnosis Related Groups (MS-DRGs) and estimates financial impact. This enables "revenue at risk" analysis — identifying cases where missed CC/MCC secondary diagnoses lead to lower-severity DRG assignments and reduced reimbursement.
@@ -730,10 +760,10 @@ The `DRGCostEstimator` (`src/clinical/drg_costs.py`) maps ICD-10-CM codes to Med
 4. Calculates revenue at risk from undercoding
 5. Attaches the cost analysis to the primary diagnosis entity
 
-**Data sources:**
-- `drgpy` library for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`)
-- CMS IPPS Table 5 relative weights (loadable from Excel via `table5_path` parameter)
-- Built-in fallback: 32 common medical DRGs with FY 2026 weights for CI/testing
+**Data source — drgpy (primary):**
+- `drgpy` library (Apache 2.0, `pip install drgpy`) provides both the ICD-10 to MS-DRG grouper and the complete DRG catalog — all 767 MS-DRGs with titles, MDC, and MED/SURG classification
+- No fallback tables: drgpy is the single source of truth for all DRG resolution
+- CMS IPPS Table 5 can optionally be loaded (via `table5_path`) for accurate per-DRG relative weights
 
 ## How the ICD Entity Linker Works
 
@@ -767,7 +797,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 
 **7-source composite ICD NER dataset**: Merging seven sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, curated clinical examples, MedMentions, and MACCROBAT) gives broad coverage of diagnosable conditions across PubMed abstracts and clinical notes. Template-generated examples target documented NER failure patterns (abbreviations, boundary errors, lab confusion). Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
 
-**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. Built-in fallback weights for 32 common DRGs ensure CI/testing works without external dependencies.
+**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. Uses drgpy as the single data source for all 767 DRGs (grouper + catalog), with optional CMS Table 5 overlay for accurate relative weights.
 
 ## Public Data Sources
 
