@@ -272,8 +272,14 @@ class DRGCostEstimator:
     ) -> Optional[str]:
         if self._grouper is not None:
             try:
-                result = self._grouper.get_drg(dx, pr, gender=gender, is_alive=is_alive)
-                if result:
+                # drgpy expects ICD codes without dots (e.g. "J189" not "J18.9")
+                dx_clean = [c.replace(".", "") for c in dx]
+                pr_clean = [c.replace(".", "") for c in pr]
+                result = self._grouper.get_drg(
+                    dx_clean, pr_clean, gender=gender, is_alive=is_alive,
+                )
+                # DRG "000" means ungroupable — fall through to fallback
+                if result and str(result) != "000":
                     return str(result)
             except Exception as e:
                 logger.debug("DRG grouping failed: %s", e)
