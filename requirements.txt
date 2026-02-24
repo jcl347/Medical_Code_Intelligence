@@ -26,11 +26,9 @@ pytest-cov>=4.1.0
 # Clinical coding
 drgpy>=0.0.6
 
-# Parameter-efficient fine-tuning (LoRA/QLoRA)
-peft>=0.6.0
-
-# Optional: 4-bit quantization for QLoRA (requires CUDA GPU)
-# bitsandbytes>=0.41.0
+# QLoRA fine-tuning (for GatorTron and other large models)
+peft>=0.7.0
+bitsandbytes>=0.41.0
 
 # Optional: wandb for experiment tracking
 # wandb>=0.16.0

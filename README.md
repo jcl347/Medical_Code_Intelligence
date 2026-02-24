@@ -1,4 +1,5 @@
 # Medical Code Intelligence
+### by Jordan Limperis
 
 **ICD-10 NER system** for extracting diagnosis mentions from clinical text, resolving them to ICD-10-CM codes, estimating MS-DRG cost impact, with adversarial training, learned assertion detection, and physician shorthand expansion.
 
@@ -43,6 +44,10 @@ python scripts/train.py --model bio_clinicalbert --dataset icd_ner --lr 3e-5
 
 # Train GatorTron (pre-trained on 90B words of clinical text)
 python scripts/train.py --model gatortron-base --dataset icd_ner --lr 3e-5
+
+# QLoRA fine-tuning for GatorTron (4-bit quantization + LoRA, ~75% less memory)
+python scripts/train_gatortron_qlora.py --dataset icd_ner
+python scripts/train_gatortron_qlora.py --model UFNLP/gatortron-base --lora-rank 32 --lr 1e-4
 
 # Train with CRF layer for structured label decoding
 python scripts/train.py --model pubmedbert --dataset icd_ner --use-crf
@@ -195,8 +200,8 @@ for r in results:
 from src.clinical.drg_costs import DRGCostEstimator
 
 # Maps ICD-10-CM codes to MS-DRGs and estimates financial impact
-# Uses drgpy for ICD→DRG grouping + NBER CMS Table 5 for real FY 2026 weights
-# NBER CSV auto-downloaded on first use, cached at ~/.cache/medical_code_intelligence/
+# DRG weights: auto-downloaded from CMS IPPS Table 5 (~770 DRGs)
+# DRG grouping: requires drgpy (pip install drgpy)
 estimator = DRGCostEstimator()
 print(f"DRGs available: {estimator.num_drgs}")  # ~799 (drgpy + NBER)
 
@@ -318,15 +323,17 @@ CMS publishes aggregate OASIS (Outcome and Assessment Information Set) statistic
 
 ## Supported Models
 
-| Key | Model | Best For |
-|-----|-------|----------|
-| `pubmedbert` | `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext` | General biomedical NER (SOTA on BLURB) |
-| `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | Clinical notes (pre-trained on MIMIC-III) |
-| `biobert` | `dmis-lab/biobert-v1.1` | PubMed literature |
-| `scibert` | `allenai/scibert_scivocab_uncased` | Scientific papers |
-| `gatortron-base` | `UFNLP/gatortron-base` | Clinical text (90B words) |
+| Key | Model | Params | Best For |
+|-----|-------|--------|----------|
+| `pubmedbert` | `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext` | 110M | General biomedical NER (SOTA on BLURB) |
+| `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | 110M | Clinical notes (pre-trained on MIMIC-III) |
+| `biobert` | `dmis-lab/biobert-v1.1` | 110M | PubMed literature |
+| `scibert` | `allenai/scibert_scivocab_uncased` | 110M | Scientific papers |
+| `gatortron-base` | `UFNLP/gatortron-base` | 345M | Clinical text (90B words) |
+| `gatortron-medium` | `UFNLP/gatortron-medium` | ~1B | Larger GatorTron variant |
+| `gatortron-large` | `UFNLP/gatortron-large` | ~3.9B | Full GatorTron (requires QLoRA) |
 
-For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are recommended starting points.
+For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are recommended starting points. For GatorTron models, use the dedicated QLoRA training script (`scripts/train_gatortron_qlora.py`).
 
 ## Interactive Notebook
 
@@ -348,7 +355,7 @@ Medical_Code_Intelligence/
 │   ├── clinical/
 │   │   ├── pipeline.py            # Unified pipeline: NER → negation → ICD → DRG
 │   │   ├── icd_codes.py           # TF-IDF ICD-10-CM entity linker (51K codes)
-│   │   ├── drg_costs.py           # MS-DRG assignment + cost impact analysis
+│   │   ├── drg_costs.py           # MS-DRG assignment + cost impact (CMS Table 5)
 │   │   ├── negation.py            # ConText/NegEx rule-based negation
 │   │   ├── assertion.py           # Transformer assertion classifier
 │   │   ├── shorthand.py           # Data-driven abbreviation expansion
@@ -366,6 +373,7 @@ Medical_Code_Intelligence/
 │   ├── training/
 │   │   ├── trainer.py             # HuggingFace Trainer setup
 │   │   ├── adversarial.py         # FGM/PGD adversarial training (+0.5-1.5% F1)
+│   │   ├── qlora.py              # QLoRA (4-bit + LoRA) for large models
 │   │   └── callbacks.py           # Early stopping
 │   ├── evaluation/
 │   │   ├── metrics.py             # Entity-level F1 (seqeval)
@@ -375,6 +383,7 @@ Medical_Code_Intelligence/
 │       └── predictor.py           # Inference with batching
 ├── scripts/
 │   ├── train.py                   # Training CLI
+│   ├── train_gatortron_qlora.py   # QLoRA fine-tuning for GatorTron
 │   ├── evaluate.py                # Evaluation CLI
 │   ├── predict.py                 # Prediction CLI (interactive + batch)
 │   └── benchmark.py               # Multi-model x multi-dataset benchmarking
@@ -463,6 +472,52 @@ python scripts/train.py --model pubmedbert --dataset icd_ner \
 python scripts/train.py --model pubmedbert --dataset icd_ner \
     --adversarial --adv-method pgd --adv-epsilon 0.5 --label-smoothing 0.05
 ```
+
+---
+
+### `scripts/train_gatortron_qlora.py` — QLoRA Fine-Tuning for GatorTron
+
+Fine-tunes GatorTron (345M+ params) using QLoRA — 4-bit NF4 quantization + LoRA adapters — reducing GPU memory by ~75%. This is a dedicated command because the model's size requires specialized memory management.
+
+```bash
+python scripts/train_gatortron_qlora.py [OPTIONS]
+```
+
+**QLoRA parameters:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model <hf_id>` | `UFNLP/gatortron-base` | HuggingFace model ID. Also supports `UFNLP/gatortron-medium` and `UFNLP/gatortron-large`. |
+| `--lora-rank <int>` | `16` | LoRA decomposition rank. Higher = more capacity but more trainable params. Range: 8–64. |
+| `--lora-alpha <int>` | `32` | LoRA scaling factor. Typically `2 * lora_rank`. |
+| `--lora-dropout <float>` | `0.05` | Dropout probability for LoRA layers. |
+| `--target-modules <name> [...]` | `query value` | Model modules to apply LoRA adapters to. |
+| `--no-4bit` | off | Disable 4-bit quantization (full precision + LoRA only). |
+| `--compute-dtype <type>` | `bfloat16` | Compute dtype for 4-bit ops. Use `float16` for pre-Ampere GPUs. |
+| `--dry-run` | off | Load model, print parameter counts, and exit without training. |
+
+**Training parameters** (same as `train.py`): `--dataset`, `--epochs`, `--batch-size`, `--lr`, `--weight-decay`, `--warmup-ratio`, `--grad-accum`, `--patience`, `--scheduler`, `--adversarial`, `--adv-method`, `--eval-steps`, `--output-dir`, `--seed`, `--wandb`.
+
+**Examples:**
+
+```bash
+# Default: GatorTron-base QLoRA on ICD NER
+python scripts/train_gatortron_qlora.py
+
+# Larger LoRA rank with custom LR
+python scripts/train_gatortron_qlora.py --lora-rank 32 --lora-alpha 64 --lr 1e-4
+
+# With adversarial training
+python scripts/train_gatortron_qlora.py --adversarial
+
+# Full-precision LoRA (no quantization) on CPU
+python scripts/train_gatortron_qlora.py --no-4bit
+
+# Dry run to verify setup
+python scripts/train_gatortron_qlora.py --dry-run
+```
+
+**Output:** Saves LoRA adapters to `outputs/<model>_qlora_<dataset>/lora_adapters/` and a merged full model to `outputs/<model>_qlora_<dataset>/best_model/` for direct use with `predict.py`.
 
 ---
 
@@ -710,34 +765,52 @@ python scripts/train.py --model pubmedbert --dataset icd_ner \
 
 Based on: RanAT4BIE (2025), FreeLB (ICLR 2020), Miyato et al. (2017).
 
-## LoRA / QLoRA — Parameter-Efficient Fine-Tuning
+## QLoRA Fine-Tuning (GatorTron)
 
-Fine-tune large models like **GatorTron** (345M params) with LoRA/QLoRA, training only ~0.5% of parameters while matching full fine-tuning performance. Uses the [PEFT](https://github.com/huggingface/peft) library.
+QLoRA (Quantized Low-Rank Adaptation) enables memory-efficient fine-tuning of large GatorTron models by combining 4-bit NF4 quantization with LoRA adapters. Implemented in `src/training/qlora.py` with a dedicated training script.
 
-| Method | Trainable Params | Memory Savings | GPU Required | Config |
-|--------|-----------------|----------------|--------------|--------|
-| Full fine-tuning | 100% (~345M) | None | 16GB+ VRAM | default |
-| **LoRA** | ~0.5% (~1.8M) | ~70% | CPU or GPU | `--lora` |
-| **QLoRA** | ~0.5% (~1.8M) | ~87.5% | CUDA GPU | `--qlora` |
+**Why QLoRA for GatorTron?**
+- GatorTron models (345M–3.9B params) require significant GPU memory for full fine-tuning
+- QLoRA reduces VRAM by ~75% while retaining 95–99% of full fine-tuning NER performance
+- Only ~1.5% of parameters are trainable (LoRA adapters on attention layers)
+- 4-bit NF4 quantization via bitsandbytes preserves model quality
+
+| Config | Default | Description |
+|--------|---------|-------------|
+| `--lora-rank` | 16 | LoRA decomposition rank (8–64) |
+| `--lora-alpha` | 32 | LoRA scaling factor |
+| `--lora-dropout` | 0.05 | Dropout on LoRA layers |
+| `--target-modules` | query value | Attention layers to adapt |
+| `--lr` | 2e-4 | Learning rate (higher than full fine-tuning) |
+| `--batch-size` | 8 | Per-device batch size |
+| `--grad-accum` | 2 | Gradient accumulation steps |
+
+**Memory comparison (GatorTron-base, 345M params):**
+
+| Method | GPU Memory | Trainable Params |
+|--------|-----------|-----------------|
+| Full fine-tuning | ~5.5 GB | 100% (345M) |
+| QLoRA (4-bit + LoRA r=16) | ~1.4 GB | ~1.5% (~5M) |
+
+**Required packages:** `peft>=0.7.0`, `bitsandbytes>=0.41.0` (included in requirements.txt)
 
 ```bash
-# LoRA (recommended — works on CPU or GPU)
-python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lr 1e-3
+# Default: GatorTron-base with QLoRA on ICD NER
+python scripts/train_gatortron_qlora.py
 
-# QLoRA (4-bit quantization — requires CUDA GPU + bitsandbytes)
-python scripts/train.py --model gatortron-base --dataset icd_ner --qlora --lr 1e-3
+# Custom configuration
+python scripts/train_gatortron_qlora.py --lora-rank 32 --lora-alpha 64 --lr 1e-4
 
-# Custom LoRA rank and alpha
-python scripts/train.py --model gatortron-base --dataset icd_ner --lora \
-    --lora-r 32 --lora-alpha 32 --lr 1e-3
+# With adversarial training
+python scripts/train_gatortron_qlora.py --adversarial
+
+# Dry run: verify model loads and show parameter counts
+python scripts/train_gatortron_qlora.py --dry-run
 ```
 
-**Key details:**
-- LoRA adapters are applied to attention projections (`query`, `key`, `value`)
-- The NER classification head trains in full precision (`modules_to_save=["classifier"]`)
-- Uses a higher learning rate (1e-3) than full fine-tuning (5e-5)
-- CRF and LoRA/QLoRA are mutually exclusive
-- Requires: `peft>=0.6.0` (included). QLoRA also needs: `bitsandbytes>=0.41.0` (optional)
+The script saves both LoRA adapters (few MB, at `lora_adapters/`) and a merged full model (at `best_model/`) for direct inference with `predict.py`.
+
+Based on: Hu et al. (2022) — LoRA, Dettmers et al. (2023) — QLoRA.
 
 ## MS-DRG Cost Estimation
 
@@ -761,10 +834,8 @@ The `DRGCostEstimator` (`src/clinical/drg_costs.py`) maps ICD-10-CM codes to Med
 5. Attaches the cost analysis to the primary diagnosis entity
 
 **Data sources:**
-- **drgpy** (Apache 2.0, `pip install drgpy`) — ICD-10 to MS-DRG grouper + complete DRG catalog (767 DRGs with titles, MDC, MED/SURG type)
-- **NBER CMS Table 5 CSV** — official FY 2026 relative weights, geometric and arithmetic mean LOS for ~770 DRGs, auto-downloaded from `data.nber.org` on first use and cached locally at `~/.cache/medical_code_intelligence/`
-- **CMS IPPS Table 5 Excel** (optional) — local Excel file via `table5_path` takes precedence over the NBER CSV
-- No fallback weight tables: drgpy provides DRG metadata, NBER provides accurate CMS weights
+- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights, auto-downloaded from CMS.gov on first use and cached locally at `~/.cache/medical_code_intelligence/`. Can also load from a local Excel file via `table5_path` parameter. Override download URL via `CMS_TABLE5_URL` environment variable.
+- `drgpy` library for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`)
 
 ## How the ICD Entity Linker Works
 
@@ -798,7 +869,9 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 
 **7-source composite ICD NER dataset**: Merging seven sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, curated clinical examples, MedMentions, and MACCROBAT) gives broad coverage of diagnosable conditions across PubMed abstracts and clinical notes. Template-generated examples target documented NER failure patterns (abbreviations, boundary errors, lab confusion). Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
 
-**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. Uses drgpy for ICD→DRG grouping and DRG metadata, with real CMS FY 2026 relative weights auto-downloaded from NBER-hosted Table 5 CSV.
+**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. DRG weights are sourced from CMS IPPS Table 5 (auto-downloaded from CMS.gov).
+
+**QLoRA for large models**: 4-bit NF4 quantization + LoRA adapters enable memory-efficient fine-tuning of GatorTron (345M–3.9B params) with ~75% less GPU memory. A dedicated training script (`scripts/train_gatortron_qlora.py`) keeps the complexity out of the main training path.
 
 ## Public Data Sources
 
@@ -813,7 +886,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | ICD NER training | Curated + template-generated examples | Project-internal | ~160 sentences |
 | ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
 | MS-DRG grouper | [drgpy](https://pypi.org/project/drgpy/) | Apache 2.0 | ~770 DRGs |
-| DRG weights | [NBER CMS Table 5](https://data.nber.org/drg/csv/drgweight2026FR.csv) (FY 2026) | Public domain | ~770 DRGs |
+| DRG weights | [CMS IPPS Table 5](https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps) (FY 2026, auto-downloaded) | Public domain | ~770 DRGs |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
 | Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
 | Disambiguation | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | 14M abstracts |
