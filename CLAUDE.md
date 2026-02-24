@@ -78,6 +78,12 @@ python scripts/train.py --model pubmedbert --dataset icd_ner --adversarial
 # Train with PGD adversarial training (stronger but slower)
 python scripts/train.py --model pubmedbert --dataset icd_ner --adversarial --adv-method pgd
 
+# Train GatorTron with LoRA (parameter-efficient, ~0.5% trainable params)
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lr 1e-3
+
+# Train GatorTron with QLoRA (4-bit quantization, requires CUDA + bitsandbytes)
+python scripts/train.py --model gatortron-base --dataset icd_ner --qlora --lr 1e-3
+
 # Run inference (single text)
 python scripts/predict.py --model-path outputs/pubmedbert_icd_ner/best_model --text "Pt denies cp or sob."
 
@@ -99,7 +105,7 @@ python scripts/benchmark.py --models pubmedbert biobert bio_clinicalbert --datas
 | `biobert` | `dmis-lab/biobert-v1.1` | 110M | PubMed pre-trained |
 | `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | 110M | MIMIC-III clinical notes |
 | `scibert` | `allenai/scibert_scivocab_uncased` | 110M | Scientific papers |
-| `gatortron-base` | `UFNLP/gatortron-base` | 345M | 90B words clinical text |
+| `gatortron-base` | `UFNLP/gatortron-base` | 345M | 90B words clinical text, use with `--lora` or `--qlora` |
 
 Custom models can be passed via `--model-path <hf_id_or_local_path>`.
 
@@ -148,6 +154,42 @@ Key parameters in `NERConfig`:
 
 Based on: RanAT4BIE (2025), FreeLB (ICLR 2020), Miyato et al. (2017).
 
+## LoRA / QLoRA — Parameter-Efficient Fine-Tuning
+
+LoRA (Low-Rank Adaptation) and QLoRA (Quantized LoRA) enable parameter-efficient fine-tuning of large models like GatorTron (345M params). Implemented in `src/models/ner_model.py` via the `peft` library.
+
+**How it works**: Injects trainable low-rank matrices into attention layers (query, key, value) while freezing the rest of the model. The NER classification head trains in full precision. QLoRA additionally loads the base model in 4-bit NF4 quantization.
+
+| Method | Trainable Params | Memory Savings | GPU Requirement | Config |
+|--------|-----------------|----------------|-----------------|--------|
+| Full FT | 100% (~345M) | None | 16GB+ VRAM | `--model gatortron-base` |
+| LoRA | ~0.5% (~1.8M) | ~70% | CPU or GPU | `--lora` |
+| QLoRA | ~0.5% (~1.8M) | ~87.5% | CUDA GPU | `--qlora` |
+
+**Key parameters in `NERConfig`:**
+- `use_lora`: Enable LoRA adapters (default: False)
+- `use_qlora`: Enable 4-bit quantization + LoRA (default: False)
+- `lora_r`: Rank (default: 16). Higher = more capacity
+- `lora_alpha`: Scaling factor (default: 16). Effective scaling = alpha/r
+- `lora_dropout`: Dropout on LoRA layers (default: 0.1)
+- `lora_target_modules`: Comma-separated attention modules (default: "query,key,value")
+
+**CLI examples:**
+```bash
+# LoRA (recommended for GatorTron — works on CPU or GPU)
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lr 1e-3
+
+# QLoRA (4-bit — requires CUDA GPU + bitsandbytes)
+python scripts/train.py --model gatortron-base --dataset icd_ner --qlora --lr 1e-3
+
+# Custom rank/alpha
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lora-r 32 --lora-alpha 32
+```
+
+**Requirements:** `peft>=0.6.0` (included in requirements.txt). For QLoRA: `bitsandbytes>=0.41.0` (optional, commented in requirements.txt).
+
+**Note:** LoRA uses a higher learning rate (1e-3) than full fine-tuning (5e-5). The NER classification head is always trained in full precision via `modules_to_save=["classifier"]`. CRF and LoRA/QLoRA are mutually exclusive.
+
 ## MS-DRG Cost Scoping
 
 The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Medicare Severity Diagnosis Related Groups (MS-DRGs) and estimates financial impact.
@@ -161,17 +203,19 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 **Pipeline integration**: When `resolve_drg=True`, the pipeline collects ICD codes from all affirmed entities, runs DRG grouping, and attaches cost analysis to the primary diagnosis entity.
 
 **Data sources**:
-- `drgpy` library for ICD-10 to MS-DRG grouper logic (optional, `pip install drgpy`)
-- CMS IPPS Table 5 relative weights (can load from Excel file via `table5_path`)
-- Built-in fallback: 32 common medical DRGs with FY 2026 weights for CI/testing
+- **drgpy** (Apache 2.0, `pip install drgpy`) — ICD-10 to MS-DRG grouper + complete DRG catalog (767 DRGs with titles, MDC, MED/SURG type)
+- **NBER CMS Table 5 CSV** — official FY 2026 relative weights, geometric and arithmetic mean LOS for ~770 DRGs, auto-downloaded from `https://data.nber.org/drg/csv/drgweight2026FR.csv` on first use and cached locally at `~/.cache/medical_code_intelligence/`
+- **CMS IPPS Table 5 Excel** (optional) — local Excel file via `table5_path` parameter takes precedence over the NBER CSV
+- No fallback weight tables: drgpy provides DRG metadata, NBER provides accurate CMS weights
 - FY 2026 national standardized amount: $6,752.61
 
 ```python
 from src.clinical.drg_costs import DRGCostEstimator
 
 estimator = DRGCostEstimator()
-# With drgpy installed:
+print(f"DRGs available: {estimator.num_drgs}")  # ~799 (767 drgpy + NBER)
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])
+print(f"DRG {result.drg_code}: wt={result.relative_weight:.4f}, ${result.estimated_payment:,.2f}")
 # Analyze CC/MCC impact:
 analysis = estimator.analyze_cost_impact(["J18.9", "E11.9"])
 print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
@@ -185,8 +229,9 @@ print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
 - **Dual negation strategies**: Rule-based (fast, deterministic, no GPU) and transformer-based (learned, handles edge cases). Default is rule-based.
 - **Adversarial training**: FGM/PGD perturbation on embeddings improves robustness and F1 with no architecture changes — just a training-time regularizer.
 - **7-source composite dataset**: Combines public corpora, clinical case reports, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion).
-- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk.
-- **Offline fallbacks**: All external downloads (ICD codes, abbreviations, DRG weights) have built-in fallback data so tests and CI work without network access.
+- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk. Uses real CMS FY 2026 relative weights from NBER-hosted Table 5 CSV (auto-downloaded, cached).
+- **LoRA/QLoRA for large models**: GatorTron (345M) uses parameter-efficient fine-tuning via LoRA adapters on attention layers, training ~0.5% of parameters. QLoRA adds 4-bit quantization for memory-constrained GPUs.
+- **Offline fallbacks**: ICD codes and abbreviations have built-in fallback data so tests and CI work without network access.
 - **BIO label scheme**: Normalized across all datasets. Garbage labels from source corpora are cleaned automatically.
 
 ## Key Configuration (configs/ner_config.py)
@@ -197,6 +242,7 @@ Default training hyperparameters in `NERConfig`:
 - Early stopping patience: `5` (metric: entity-level F1)
 - FP16 mixed precision: enabled by default
 - Adversarial training: disabled by default (`use_adversarial_training=False`)
+- LoRA/QLoRA: disabled by default (`use_lora=False`, `use_qlora=False`)
 - Negation detection: enabled by default, scope window: 6 words
 - DRG cost scoping: disabled by default (`resolve_drg=False`)
 
@@ -279,6 +325,6 @@ When making changes to the repository, update `README.md` to reflect those chang
 - GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Reduce batch size or use gradient accumulation if OOM.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.
-- MS-DRG grouping requires `drgpy` (`pip install drgpy`). Without it, cost estimation uses the fallback weight table only (no ICD-to-DRG grouper logic).
+- MS-DRG grouping requires `drgpy` (`pip install drgpy`). drgpy provides both the ICD→DRG grouper and DRG metadata (767 DRGs). Without it, DRG resolution is unavailable. CMS relative weights are auto-downloaded from NBER on first use (~100KB CSV, cached at `~/.cache/medical_code_intelligence/`).
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.
