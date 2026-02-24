@@ -202,18 +202,20 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 
 **Pipeline integration**: When `resolve_drg=True`, the pipeline collects ICD codes from all affirmed entities, runs DRG grouping, and attaches cost analysis to the primary diagnosis entity.
 
-**Data source — drgpy (primary)**:
-- `drgpy` library (Apache 2.0, `pip install drgpy`) provides both the ICD-10 to MS-DRG grouper and the complete DRG catalog — all 767 MS-DRGs with titles, MDC, and MED/SURG classification
-- No fallback tables needed: drgpy is the single source of truth for DRG resolution
-- CMS IPPS Table 5 can optionally be loaded (via `table5_path`) for accurate per-DRG relative weights; without Table 5, cost estimates use weight 1.0 (national average)
+**Data sources**:
+- **drgpy** (Apache 2.0, `pip install drgpy`) — ICD-10 to MS-DRG grouper + complete DRG catalog (767 DRGs with titles, MDC, MED/SURG type)
+- **NBER CMS Table 5 CSV** — official FY 2026 relative weights, geometric and arithmetic mean LOS for ~770 DRGs, auto-downloaded from `https://data.nber.org/drg/csv/drgweight2026FR.csv` on first use and cached locally at `~/.cache/medical_code_intelligence/`
+- **CMS IPPS Table 5 Excel** (optional) — local Excel file via `table5_path` parameter takes precedence over the NBER CSV
+- No fallback weight tables: drgpy provides DRG metadata, NBER provides accurate CMS weights
 - FY 2026 national standardized amount: $6,752.61
 
 ```python
 from src.clinical.drg_costs import DRGCostEstimator
 
 estimator = DRGCostEstimator()
-print(f"DRGs available: {estimator.num_drgs}")  # 767 from drgpy
+print(f"DRGs available: {estimator.num_drgs}")  # ~799 (767 drgpy + NBER)
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])
+print(f"DRG {result.drg_code}: wt={result.relative_weight:.4f}, ${result.estimated_payment:,.2f}")
 # Analyze CC/MCC impact:
 analysis = estimator.analyze_cost_impact(["J18.9", "E11.9"])
 print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
@@ -227,7 +229,7 @@ print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
 - **Dual negation strategies**: Rule-based (fast, deterministic, no GPU) and transformer-based (learned, handles edge cases). Default is rule-based.
 - **Adversarial training**: FGM/PGD perturbation on embeddings improves robustness and F1 with no architecture changes — just a training-time regularizer.
 - **7-source composite dataset**: Combines public corpora, clinical case reports, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion).
-- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk.
+- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk. Uses real CMS FY 2026 relative weights from NBER-hosted Table 5 CSV (auto-downloaded, cached).
 - **LoRA/QLoRA for large models**: GatorTron (345M) uses parameter-efficient fine-tuning via LoRA adapters on attention layers, training ~0.5% of parameters. QLoRA adds 4-bit quantization for memory-constrained GPUs.
 - **Offline fallbacks**: ICD codes and abbreviations have built-in fallback data so tests and CI work without network access.
 - **BIO label scheme**: Normalized across all datasets. Garbage labels from source corpora are cleaned automatically.
@@ -323,6 +325,6 @@ When making changes to the repository, update `README.md` to reflect those chang
 - GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Reduce batch size or use gradient accumulation if OOM.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.
-- MS-DRG grouping requires `drgpy` (`pip install drgpy`). drgpy provides both the ICD→DRG grouper and the complete DRG catalog (767 DRGs). Without it, DRG resolution is unavailable.
+- MS-DRG grouping requires `drgpy` (`pip install drgpy`). drgpy provides both the ICD→DRG grouper and DRG metadata (767 DRGs). Without it, DRG resolution is unavailable. CMS relative weights are auto-downloaded from NBER on first use (~100KB CSV, cached at `~/.cache/medical_code_intelligence/`).
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.

@@ -195,10 +195,10 @@ for r in results:
 from src.clinical.drg_costs import DRGCostEstimator
 
 # Maps ICD-10-CM codes to MS-DRGs and estimates financial impact
-# Uses drgpy for both ICD→DRG grouping and complete DRG catalog (767 DRGs)
-# Optional: load CMS Table 5 for accurate per-DRG relative weights
+# Uses drgpy for ICD→DRG grouping + NBER CMS Table 5 for real FY 2026 weights
+# NBER CSV auto-downloaded on first use, cached at ~/.cache/medical_code_intelligence/
 estimator = DRGCostEstimator()
-print(f"DRGs available: {estimator.num_drgs}")  # 767 from drgpy
+print(f"DRGs available: {estimator.num_drgs}")  # ~799 (drgpy + NBER)
 
 # Assign DRG and estimate cost
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])
@@ -760,10 +760,11 @@ The `DRGCostEstimator` (`src/clinical/drg_costs.py`) maps ICD-10-CM codes to Med
 4. Calculates revenue at risk from undercoding
 5. Attaches the cost analysis to the primary diagnosis entity
 
-**Data source — drgpy (primary):**
-- `drgpy` library (Apache 2.0, `pip install drgpy`) provides both the ICD-10 to MS-DRG grouper and the complete DRG catalog — all 767 MS-DRGs with titles, MDC, and MED/SURG classification
-- No fallback tables: drgpy is the single source of truth for all DRG resolution
-- CMS IPPS Table 5 can optionally be loaded (via `table5_path`) for accurate per-DRG relative weights
+**Data sources:**
+- **drgpy** (Apache 2.0, `pip install drgpy`) — ICD-10 to MS-DRG grouper + complete DRG catalog (767 DRGs with titles, MDC, MED/SURG type)
+- **NBER CMS Table 5 CSV** — official FY 2026 relative weights, geometric and arithmetic mean LOS for ~770 DRGs, auto-downloaded from `data.nber.org` on first use and cached locally at `~/.cache/medical_code_intelligence/`
+- **CMS IPPS Table 5 Excel** (optional) — local Excel file via `table5_path` takes precedence over the NBER CSV
+- No fallback weight tables: drgpy provides DRG metadata, NBER provides accurate CMS weights
 
 ## How the ICD Entity Linker Works
 
@@ -797,7 +798,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 
 **7-source composite ICD NER dataset**: Merging seven sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, curated clinical examples, MedMentions, and MACCROBAT) gives broad coverage of diagnosable conditions across PubMed abstracts and clinical notes. Template-generated examples target documented NER failure patterns (abbreviations, boundary errors, lab confusion). Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
 
-**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. Uses drgpy as the single data source for all 767 DRGs (grouper + catalog), with optional CMS Table 5 overlay for accurate relative weights.
+**MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. Uses drgpy for ICD→DRG grouping and DRG metadata, with real CMS FY 2026 relative weights auto-downloaded from NBER-hosted Table 5 CSV.
 
 ## Public Data Sources
 
@@ -812,7 +813,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | ICD NER training | Curated + template-generated examples | Project-internal | ~160 sentences |
 | ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
 | MS-DRG grouper | [drgpy](https://pypi.org/project/drgpy/) | Apache 2.0 | ~770 DRGs |
-| DRG weights | CMS IPPS Table 5 (FY 2026) | Public domain | ~770 DRGs |
+| DRG weights | [NBER CMS Table 5](https://data.nber.org/drg/csv/drgweight2026FR.csv) (FY 2026) | Public domain | ~770 DRGs |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
 | Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
 | Disambiguation | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | 14M abstracts |
