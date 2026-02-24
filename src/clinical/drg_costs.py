@@ -273,10 +273,10 @@ class DRGCostEstimator:
         if self._grouper is not None:
             try:
                 result = self._grouper.get_drg(dx, pr, gender=gender, is_alive=is_alive)
-                return str(result) if result else None
+                if result:
+                    return str(result)
             except Exception as e:
                 logger.debug("DRG grouping failed: %s", e)
-                return None
 
         # Fallback: map common principal diagnoses to base-level DRGs.
         # This covers only simple single-principal-diagnosis cases and
