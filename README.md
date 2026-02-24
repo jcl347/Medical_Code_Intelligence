@@ -203,6 +203,7 @@ from src.clinical.drg_costs import DRGCostEstimator
 # DRG weights: auto-downloaded from CMS IPPS Table 5 (~770 DRGs)
 # DRG grouping: requires drgpy (pip install drgpy)
 estimator = DRGCostEstimator()
+print(f"DRGs available: {estimator.num_drgs}")  # ~799 (drgpy + NBER)
 
 # Assign DRG and estimate cost
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])

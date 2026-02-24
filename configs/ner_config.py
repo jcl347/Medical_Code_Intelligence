@@ -218,6 +218,14 @@ class NERConfig:
     # --- CRF layer (optional, can boost NER performance) ---
     use_crf: bool = False
 
+    # --- LoRA / QLoRA (parameter-efficient fine-tuning) ---
+    use_lora: bool = False             # LoRA adapters (trains ~0.5% of params)
+    use_qlora: bool = False            # QLoRA = 4-bit quantization + LoRA (for memory-constrained GPUs)
+    lora_r: int = 16                   # LoRA rank (higher = more capacity, more params)
+    lora_alpha: int = 16               # LoRA scaling factor (alpha/r = scaling multiplier)
+    lora_dropout: float = 0.1          # Dropout on LoRA layers
+    lora_target_modules: str = "query,key,value"  # Comma-separated attention modules
+
     # --- Adversarial training (FGM/PGD on embeddings) ---
     use_adversarial_training: bool = False
     adv_method: str = "fgm"             # "fgm" (~2x cost) or "pgd" (~4x cost)

@@ -164,8 +164,13 @@ class DRGCostEstimator:
         self._weights: Dict[str, Dict] = {}
         self._grouper = None
 
-        self._load_weights(table5_path)
         self._init_grouper(drg_version)
+        self._load_weights(table5_path)
+
+    @property
+    def num_drgs(self) -> int:
+        """Number of DRGs available for resolution."""
+        return len(self._weights)
 
     # ------------------------------------------------------------------
     # Public API
@@ -442,12 +447,7 @@ class DRGCostEstimator:
             return None
 
         title = entry["title"]
-        severity = "base"
-        title_upper = title.upper()
-        if "W MCC" in title_upper or "WITH MCC" in title_upper:
-            severity = "mcc"
-        elif "W CC" in title_upper or "WITH CC" in title_upper:
-            severity = "cc"
+        severity = _classify_severity(title)
 
         return DRGResult(
             drg_code=code,
@@ -464,7 +464,7 @@ class DRGCostEstimator:
     def _find_drg_family(self, drg_code: str) -> List[Tuple[str, str]]:
         """Find related DRGs in the same clinical family (base/CC/MCC variants)."""
         code_int = int(drg_code)
-        base_title = self._strip_severity(
+        base_title = _strip_severity(
             self._weights.get(str(code_int).zfill(3), {}).get("title", "")
         )
         results = []
@@ -476,15 +476,10 @@ class DRGCostEstimator:
             entry = self._weights.get(candidate)
             if entry is None:
                 continue
-            candidate_base = self._strip_severity(entry["title"])
+            candidate_base = _strip_severity(entry["title"])
             if candidate_base == base_title and base_title:
-                title_upper = entry["title"].upper()
-                if "W MCC" in title_upper or "WITH MCC" in title_upper:
-                    results.append((candidate, "mcc"))
-                elif "W CC" in title_upper or "WITH CC" in title_upper:
-                    results.append((candidate, "cc"))
-                else:
-                    results.append((candidate, "base"))
+                severity = _classify_severity(entry["title"])
+                results.append((candidate, severity))
 
         return results
 

@@ -177,6 +177,42 @@ Key parameters in `NERConfig`:
 
 Based on: RanAT4BIE (2025), FreeLB (ICLR 2020), Miyato et al. (2017).
 
+## LoRA / QLoRA — Parameter-Efficient Fine-Tuning
+
+LoRA (Low-Rank Adaptation) and QLoRA (Quantized LoRA) enable parameter-efficient fine-tuning of large models like GatorTron (345M params). Implemented in `src/models/ner_model.py` via the `peft` library.
+
+**How it works**: Injects trainable low-rank matrices into attention layers (query, key, value) while freezing the rest of the model. The NER classification head trains in full precision. QLoRA additionally loads the base model in 4-bit NF4 quantization.
+
+| Method | Trainable Params | Memory Savings | GPU Requirement | Config |
+|--------|-----------------|----------------|-----------------|--------|
+| Full FT | 100% (~345M) | None | 16GB+ VRAM | `--model gatortron-base` |
+| LoRA | ~0.5% (~1.8M) | ~70% | CPU or GPU | `--lora` |
+| QLoRA | ~0.5% (~1.8M) | ~87.5% | CUDA GPU | `--qlora` |
+
+**Key parameters in `NERConfig`:**
+- `use_lora`: Enable LoRA adapters (default: False)
+- `use_qlora`: Enable 4-bit quantization + LoRA (default: False)
+- `lora_r`: Rank (default: 16). Higher = more capacity
+- `lora_alpha`: Scaling factor (default: 16). Effective scaling = alpha/r
+- `lora_dropout`: Dropout on LoRA layers (default: 0.1)
+- `lora_target_modules`: Comma-separated attention modules (default: "query,key,value")
+
+**CLI examples:**
+```bash
+# LoRA (recommended for GatorTron — works on CPU or GPU)
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lr 1e-3
+
+# QLoRA (4-bit — requires CUDA GPU + bitsandbytes)
+python scripts/train.py --model gatortron-base --dataset icd_ner --qlora --lr 1e-3
+
+# Custom rank/alpha
+python scripts/train.py --model gatortron-base --dataset icd_ner --lora --lora-r 32 --lora-alpha 32
+```
+
+**Requirements:** `peft>=0.6.0` (included in requirements.txt). For QLoRA: `bitsandbytes>=0.41.0` (optional, commented in requirements.txt).
+
+**Note:** LoRA uses a higher learning rate (1e-3) than full fine-tuning (5e-5). The NER classification head is always trained in full precision via `modules_to_save=["classifier"]`. CRF and LoRA/QLoRA are mutually exclusive.
+
 ## MS-DRG Cost Scoping
 
 The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Medicare Severity Diagnosis Related Groups (MS-DRGs) and estimates financial impact.
@@ -198,8 +234,9 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 from src.clinical.drg_costs import DRGCostEstimator
 
 estimator = DRGCostEstimator()
-# With drgpy installed:
+print(f"DRGs available: {estimator.num_drgs}")  # ~799 (767 drgpy + NBER)
 result = estimator.get_drg(["J18.9", "E11.9", "N17.9"])
+print(f"DRG {result.drg_code}: wt={result.relative_weight:.4f}, ${result.estimated_payment:,.2f}")
 # Analyze CC/MCC impact:
 analysis = estimator.analyze_cost_impact(["J18.9", "E11.9"])
 print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
@@ -289,6 +326,7 @@ Default training hyperparameters in `NERConfig`:
 - Early stopping patience: `5` (metric: entity-level F1)
 - FP16 mixed precision: enabled by default
 - Adversarial training: disabled by default (`use_adversarial_training=False`)
+- LoRA/QLoRA: disabled by default (`use_lora=False`, `use_qlora=False`)
 - Negation detection: enabled by default, scope window: 6 words
 - DRG cost scoping: disabled by default (`resolve_drg=False`)
 
