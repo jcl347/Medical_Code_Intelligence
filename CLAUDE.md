@@ -13,7 +13,7 @@ src/
   clinical/          # Core pipeline components
     pipeline.py        MedicalCodingPipeline — main user-facing API
     icd_codes.py       ICDCodeLookup — TF-IDF entity linker over 51K ICD-10-CM codes
-    drg_costs.py       DRGCostEstimator — MS-DRG assignment + cost impact analysis
+    drg_costs.py       DRGCostEstimator — MS-DRG assignment + cost impact (CMS Table 5)
     negation.py        NegationDetector — rule-based ConText/NegEx assertion (100+ triggers)
     assertion.py       AssertionClassifier — transformer assertion (clinical-assertion-negation-bert)
     shorthand.py       ShorthandExpander — abbreviation expansion with offset tracking
@@ -31,6 +31,7 @@ src/
   training/          # Training pipeline
     trainer.py         build_trainer(), build_training_args() — HuggingFace Trainer setup
     adversarial.py     AdversarialTrainer, FGM, PGD — adversarial training for +0.5-1.5% F1
+    qlora.py           build_qlora_model() — QLoRA (4-bit + LoRA) for large models
     callbacks.py       EarlyStoppingWithLogging
   evaluation/        # Metrics and analysis
     metrics.py         compute_ner_metrics() — entity-level P/R/F1 via seqeval
@@ -41,6 +42,7 @@ src/
 
 scripts/
   train.py           Main training CLI (supports --adversarial flag)
+  train_gatortron_qlora.py  QLoRA fine-tuning for GatorTron (dedicated command)
   predict.py         Inference CLI (single, batch, interactive modes)
   evaluate.py        Evaluation CLI with optional error analysis
   benchmark.py       Multi-model x multi-dataset benchmarking
@@ -78,6 +80,11 @@ python scripts/train.py --model pubmedbert --dataset icd_ner --adversarial
 # Train with PGD adversarial training (stronger but slower)
 python scripts/train.py --model pubmedbert --dataset icd_ner --adversarial --adv-method pgd
 
+# QLoRA fine-tuning for GatorTron (4-bit quantization + LoRA adapters)
+python scripts/train_gatortron_qlora.py --dataset icd_ner
+python scripts/train_gatortron_qlora.py --model UFNLP/gatortron-base --lora-rank 32 --lr 1e-4
+python scripts/train_gatortron_qlora.py --dry-run  # verify setup without training
+
 # Run inference (single text)
 python scripts/predict.py --model-path outputs/pubmedbert_icd_ner/best_model --text "Pt denies cp or sob."
 
@@ -100,8 +107,15 @@ python scripts/benchmark.py --models pubmedbert biobert bio_clinicalbert --datas
 | `bio_clinicalbert` | `emilyalsentzer/Bio_ClinicalBERT` | 110M | MIMIC-III clinical notes |
 | `scibert` | `allenai/scibert_scivocab_uncased` | 110M | Scientific papers |
 | `gatortron-base` | `UFNLP/gatortron-base` | 345M | 90B words clinical text |
+| `gatortron-medium` | `UFNLP/gatortron-medium` | ~1B | Larger GatorTron variant |
+| `gatortron-large` | `UFNLP/gatortron-large` | ~3.9B | Full GatorTron, requires QLoRA |
 
 Custom models can be passed via `--model-path <hf_id_or_local_path>`.
+
+For large GatorTron models, use the dedicated QLoRA training script:
+```bash
+python scripts/train_gatortron_qlora.py --model UFNLP/gatortron-base --dataset icd_ner
+```
 
 ## Supported Datasets
 
@@ -161,9 +175,8 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 **Pipeline integration**: When `resolve_drg=True`, the pipeline collects ICD codes from all affirmed entities, runs DRG grouping, and attaches cost analysis to the primary diagnosis entity.
 
 **Data sources**:
+- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights (auto-downloaded from CMS.gov on first use, cached locally at `~/.cache/medical_code_intelligence/`). Can also load from a local Excel file via `table5_path`. Override download URL via `CMS_TABLE5_URL` environment variable.
 - `drgpy` library for ICD-10 to MS-DRG grouper logic (optional, `pip install drgpy`)
-- CMS IPPS Table 5 relative weights (can load from Excel file via `table5_path`)
-- Built-in fallback: 32 common medical DRGs with FY 2026 weights for CI/testing
 - FY 2026 national standardized amount: $6,752.61
 
 ```python
@@ -177,6 +190,43 @@ analysis = estimator.analyze_cost_impact(["J18.9", "E11.9"])
 print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
 ```
 
+## QLoRA Fine-Tuning (GatorTron)
+
+QLoRA (Quantized Low-Rank Adaptation) enables memory-efficient fine-tuning of large models like GatorTron by combining 4-bit NF4 quantization with LoRA adapters. Implemented in `src/training/qlora.py` with a dedicated training script at `scripts/train_gatortron_qlora.py`.
+
+**How it works**: The base model is loaded in 4-bit precision (NF4 quantization via bitsandbytes), all base weights are frozen, and small trainable LoRA adapters are attached to the attention layers. Only ~1.5% of parameters are trained.
+
+| Config | Default | Description |
+|--------|---------|-------------|
+| `--lora-rank` | 16 | LoRA decomposition rank (8–64) |
+| `--lora-alpha` | 32 | LoRA scaling factor (typically 2x rank) |
+| `--lora-dropout` | 0.05 | Dropout on LoRA layers |
+| `--target-modules` | query value | Attention layers to adapt |
+| `--compute-dtype` | bfloat16 | Compute dtype for 4-bit ops |
+| `--lr` | 2e-4 | Learning rate (higher than full fine-tuning) |
+
+**Memory comparison (GatorTron-base, 345M params):**
+- Full fine-tuning: ~5.5 GB VRAM
+- QLoRA (4-bit + LoRA): ~1.4 GB VRAM (75% reduction)
+
+**Required packages**: `peft>=0.7.0`, `bitsandbytes>=0.41.0` (added to requirements.txt)
+
+```bash
+# Default: GatorTron-base with QLoRA on ICD NER
+python scripts/train_gatortron_qlora.py
+
+# Custom rank and learning rate
+python scripts/train_gatortron_qlora.py --lora-rank 32 --lora-alpha 64 --lr 1e-4
+
+# With adversarial training
+python scripts/train_gatortron_qlora.py --adversarial
+
+# Dry run (verify model loads without training)
+python scripts/train_gatortron_qlora.py --dry-run
+```
+
+Based on: Hu et al. (2022) — LoRA, Dettmers et al. (2023) — QLoRA.
+
 ## Architecture Decisions
 
 - **Pipeline approach** (NER -> Assertion -> ICD -> DRG): Components are independently swappable. Matches clinical NLP patterns from MedSpacy, cTAKES, SciSpacy.
@@ -185,8 +235,9 @@ print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
 - **Dual negation strategies**: Rule-based (fast, deterministic, no GPU) and transformer-based (learned, handles edge cases). Default is rule-based.
 - **Adversarial training**: FGM/PGD perturbation on embeddings improves robustness and F1 with no architecture changes — just a training-time regularizer.
 - **7-source composite dataset**: Combines public corpora, clinical case reports, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion).
-- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk.
-- **Offline fallbacks**: All external downloads (ICD codes, abbreviations, DRG weights) have built-in fallback data so tests and CI work without network access.
+- **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk. DRG weights sourced from CMS IPPS Table 5 (auto-downloaded).
+- **QLoRA for large models**: 4-bit quantization + LoRA adapters enable fine-tuning GatorTron (345M–3.9B params) with ~75% less GPU memory. Dedicated training script avoids complexity in the main training path.
+- **Offline fallbacks**: ICD codes and abbreviations have built-in fallback data for CI/testing. DRG weights require CMS Table 5 data (downloaded or provided locally).
 - **BIO label scheme**: Normalized across all datasets. Garbage labels from source corpora are cleaned automatically.
 
 ## Key Configuration (configs/ner_config.py)
@@ -276,9 +327,10 @@ When making changes to the repository, update `README.md` to reflect those chang
 ## Common Pitfalls
 
 - The `icd_ner` dataset is built at runtime by merging up to 7 HuggingFace datasets. First load downloads ~500MB+. Subsequent loads use cache. Sources 6 (MedMentions) and 7 (MACCROBAT) are optional and skipped gracefully if unavailable.
-- GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Reduce batch size or use gradient accumulation if OOM.
+- GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Use `scripts/train_gatortron_qlora.py` for QLoRA fine-tuning (75% less memory), or reduce batch size / use gradient accumulation for full fine-tuning.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.
-- MS-DRG grouping requires `drgpy` (`pip install drgpy`). Without it, cost estimation uses the fallback weight table only (no ICD-to-DRG grouper logic).
+- MS-DRG grouping requires `drgpy` (`pip install drgpy`). DRG weight data is auto-downloaded from CMS IPPS Table 5 on first use and cached at `~/.cache/medical_code_intelligence/`. Without drgpy or CMS weights, DRG cost estimation returns None.
+- QLoRA fine-tuning requires `peft>=0.7.0` and `bitsandbytes>=0.41.0` (in requirements.txt). 4-bit quantization requires a CUDA GPU.
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.

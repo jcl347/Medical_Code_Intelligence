@@ -26,5 +26,9 @@ pytest-cov>=4.1.0
 # Clinical coding
 drgpy>=0.0.6
 
+# QLoRA fine-tuning (for GatorTron and other large models)
+peft>=0.7.0
+bitsandbytes>=0.41.0
+
 # Optional: wandb for experiment tracking
 # wandb>=0.16.0

@@ -15,9 +15,9 @@ Key concepts:
   assignment and what it could be with proper CC/MCC capture.
 
 Data sources:
-- CMS IPPS Table 5 (DRG relative weights, published annually)
+- CMS IPPS Table 5 (DRG relative weights, ~770 DRGs, published annually)
+  Auto-downloaded from CMS.gov and cached locally on first use.
 - drgpy library (ICD-10 to MS-DRG grouper, Apache 2.0)
-- Built-in fallback data for CI/testing (32 common DRGs)
 
 Usage
 -----
@@ -32,9 +32,12 @@ Usage
 >>> print(f"Revenue at risk: ${analysis.revenue_at_risk:,.2f}")
 """
 
+import io
 import logging
 import os
 import re
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -42,6 +45,20 @@ logger = logging.getLogger(__name__)
 
 # FY 2026 CMS IPPS national standardized amount
 FY2026_STANDARDIZED_AMOUNT = 6752.61
+
+# CMS IPPS Table 5 download URL (FY 2026 Final Rule)
+# Published by CMS as public-domain data at:
+#   https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps
+# Override via CMS_TABLE5_URL environment variable or table5_url constructor param.
+_DEFAULT_CMS_TABLE5_URL = os.environ.get(
+    "CMS_TABLE5_URL",
+    "https://www.cms.gov/files/zip/fy-2026-fr-table-5.zip",
+)
+
+# Local cache directory for downloaded CMS data
+_DEFAULT_CACHE_DIR = os.path.join(
+    os.path.expanduser("~"), ".cache", "medical_code_intelligence",
+)
 
 
 @dataclass
@@ -106,8 +123,12 @@ class DRGCostEstimator:
     Map ICD-10-CM codes to MS-DRGs and estimate financial impact.
 
     Uses drgpy for grouper logic and CMS IPPS Table 5 relative weights
-    for payment estimation.  Falls back to built-in data when external
-    sources are unavailable (following the project's offline-first pattern).
+    for payment estimation.  DRG weight data is loaded from CMS Table 5:
+
+    1. Local Excel file (via ``table5_path``)
+    2. Auto-download from CMS.gov (cached locally after first download)
+
+    If neither source is available, cost estimation methods return ``None``.
 
     Parameters
     ----------
@@ -117,8 +138,15 @@ class DRGCostEstimator:
     drg_version : str
         MS-DRG grouper version for drgpy. Default ``"v40"``.
     table5_path : str, optional
-        Path to CMS IPPS Table 5 Excel file.  If not provided, uses
-        built-in fallback weights for the 32 most common DRGs.
+        Path to a local CMS IPPS Table 5 Excel file. If provided and the
+        file exists, weights are loaded from it directly.
+    table5_url : str, optional
+        URL to download CMS IPPS Table 5 zip file. Defaults to the FY 2026
+        Final Rule Table 5 on CMS.gov. Override via ``CMS_TABLE5_URL``
+        environment variable.
+    cache_dir : str, optional
+        Directory for caching downloaded CMS data. Defaults to
+        ``~/.cache/medical_code_intelligence/``.
     """
 
     def __init__(
@@ -126,9 +154,13 @@ class DRGCostEstimator:
         base_rate: float = FY2026_STANDARDIZED_AMOUNT,
         drg_version: str = "v40",
         table5_path: Optional[str] = None,
+        table5_url: Optional[str] = None,
+        cache_dir: Optional[str] = None,
     ):
         self.base_rate = base_rate
         self.drg_version = drg_version
+        self._table5_url = table5_url or _DEFAULT_CMS_TABLE5_URL
+        self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
         self._weights: Dict[str, Dict] = {}
         self._grouper = None
 
@@ -163,6 +195,7 @@ class DRGCostEstimator:
         Returns
         -------
         DRGResult or None
+            ``None`` if grouping fails or no weight data is available.
         """
         procedure_codes = procedure_codes or []
         if not diagnosis_codes:
@@ -263,57 +296,139 @@ class DRGCostEstimator:
         except ImportError:
             logger.warning(
                 "drgpy not installed (pip install drgpy). "
-                "DRG grouping unavailable; using weight-table lookup only."
+                "ICD-to-DRG grouping is unavailable."
             )
             self._grouper = None
 
     def _group(
         self, dx: List[str], pr: List[str], gender: str, is_alive: bool,
     ) -> Optional[str]:
-        if self._grouper is not None:
-            try:
-                # drgpy expects ICD codes without dots (e.g. "J189" not "J18.9")
-                dx_clean = [c.replace(".", "") for c in dx]
-                pr_clean = [c.replace(".", "") for c in pr]
-                result = self._grouper.get_drg(
-                    dx_clean, pr_clean, gender=gender, is_alive=is_alive,
-                )
-                # DRG "000" means ungroupable — fall through to fallback
-                if result and str(result) != "000":
-                    return str(result)
-            except Exception as e:
-                logger.debug("DRG grouping failed: %s", e)
+        """Group ICD codes into an MS-DRG using drgpy."""
+        if self._grouper is None:
+            logger.debug(
+                "No DRG grouper available. Install drgpy: pip install drgpy"
+            )
+            return None
 
-        # Fallback: map common principal diagnoses to base-level DRGs.
-        # This covers only simple single-principal-diagnosis cases and
-        # always returns the *without CC/MCC* variant because we cannot
-        # evaluate CC/MCC interactions without the full grouper.
-        return _FALLBACK_ICD_TO_DRG.get(dx[0]) if dx else None
+        try:
+            # drgpy expects ICD codes without dots (e.g. "J189" not "J18.9")
+            dx_clean = [c.replace(".", "") for c in dx]
+            pr_clean = [c.replace(".", "") for c in pr]
+            result = self._grouper.get_drg(
+                dx_clean, pr_clean, gender=gender, is_alive=is_alive,
+            )
+            # DRG "000" means ungroupable
+            if result and str(result) != "000":
+                return str(result)
+        except Exception as e:
+            logger.debug("DRG grouping failed: %s", e)
+
+        return None
 
     def _load_weights(self, table5_path: Optional[str] = None):
-        """Load DRG relative weights from CMS Table 5 or fallback data."""
-        if table5_path and os.path.exists(table5_path):
-            try:
-                import pandas as pd
-                df = pd.read_excel(table5_path, dtype={"MS-DRG": str})
-                for _, row in df.iterrows():
-                    code = str(row.get("MS-DRG", "")).zfill(3)
-                    self._weights[code] = {
-                        "title": str(row.get("MS-DRG Title", "")),
-                        "mdc": str(row.get("MDC", "")),
-                        "type": str(row.get("Type", "")),
-                        "weight": float(row.get("Relative Weight", 1.0)),
-                        "geo_los": float(row.get("Geometric Mean LOS", 0)),
-                        "arith_los": float(row.get("Arithmetic Mean LOS", 0)),
-                    }
-                logger.info("Loaded %d DRG weights from %s", len(self._weights), table5_path)
-                return
-            except Exception as e:
-                logger.warning("Failed to load Table 5: %s", e)
+        """
+        Load DRG relative weights from CMS IPPS Table 5.
 
-        # Fall back to built-in weights
-        self._weights = _get_fallback_weights()
-        logger.info("Using built-in fallback DRG weights (%d DRGs)", len(self._weights))
+        Resolution order:
+        1. Local Excel file (table5_path parameter)
+        2. Auto-download from CMS.gov (cached after first download)
+        """
+        # 1. Try user-provided local Table 5 file
+        if table5_path and os.path.exists(table5_path):
+            if self._load_from_excel(table5_path):
+                return
+
+        # 2. Try cached CMS download
+        cached_path = os.path.join(self._cache_dir, "cms_table5.xlsx")
+        if os.path.exists(cached_path):
+            if self._load_from_excel(cached_path):
+                return
+
+        # 3. Try downloading from CMS.gov
+        downloaded = self._download_cms_table5()
+        if downloaded and self._load_from_excel(downloaded):
+            return
+
+        # No weight data available
+        logger.warning(
+            "No DRG weight data available. Cost estimation will return None. "
+            "To enable cost estimation, either:\n"
+            "  1. Download CMS IPPS Table 5 from CMS.gov and pass via table5_path\n"
+            "  2. Set CMS_TABLE5_URL env var to a valid CMS Table 5 zip URL\n"
+            "  3. Ensure network access for auto-download from CMS.gov"
+        )
+
+    def _load_from_excel(self, path: str) -> bool:
+        """Load DRG weights from a CMS Table 5 Excel file. Returns True on success."""
+        try:
+            import pandas as pd
+            df = pd.read_excel(path, dtype={"MS-DRG": str})
+            for _, row in df.iterrows():
+                code = str(row.get("MS-DRG", "")).zfill(3)
+                self._weights[code] = {
+                    "title": str(row.get("MS-DRG Title", "")),
+                    "mdc": str(row.get("MDC", "")),
+                    "type": str(row.get("Type", "")),
+                    "weight": float(row.get("Relative Weight", 1.0)),
+                    "geo_los": float(row.get("Geometric Mean LOS", 0)),
+                    "arith_los": float(row.get("Arithmetic Mean LOS", 0)),
+                }
+            logger.info(
+                "Loaded %d DRG weights from %s", len(self._weights), path,
+            )
+            return True
+        except Exception as e:
+            logger.warning("Failed to load Table 5 from %s: %s", path, e)
+            return False
+
+    def _download_cms_table5(self) -> Optional[str]:
+        """
+        Download CMS IPPS Table 5 data and cache locally.
+
+        Downloads the zip file from CMS.gov, extracts the Excel file,
+        and saves it to the cache directory for future use.
+
+        Returns
+        -------
+        str or None
+            Path to the cached Excel file, or None if download failed.
+        """
+        url = self._table5_url
+        cache_path = os.path.join(self._cache_dir, "cms_table5.xlsx")
+
+        try:
+            os.makedirs(self._cache_dir, exist_ok=True)
+            logger.info("Downloading CMS IPPS Table 5 from %s ...", url)
+
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "MedicalCodeIntelligence/1.0"},
+            )
+            response = urllib.request.urlopen(req, timeout=60)
+            data = response.read()
+
+            if url.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    xlsx_files = [
+                        f for f in zf.namelist()
+                        if f.lower().endswith(".xlsx")
+                    ]
+                    if not xlsx_files:
+                        logger.warning("No .xlsx file found in CMS zip archive")
+                        return None
+                    with zf.open(xlsx_files[0]) as src:
+                        with open(cache_path, "wb") as dst:
+                            dst.write(src.read())
+            else:
+                with open(cache_path, "wb") as f:
+                    f.write(data)
+
+            logger.info("CMS Table 5 cached at %s", cache_path)
+            return cache_path
+
+        except Exception as e:
+            logger.warning("Failed to download CMS Table 5: %s", e)
+            return None
 
     def _get_weight(self, drg_code: str) -> float:
         code = str(drg_code).zfill(3)
@@ -380,91 +495,3 @@ class DRGCostEstimator:
             r"\s*(W|WITH|W/O|WITHOUT)\s*(MCC|CC|CC/MCC).*", "",
             title, flags=re.IGNORECASE,
         ).strip()
-
-
-# ---------------------------------------------------------------------------
-# Fallback ICD-10 → base DRG mapping (no CC/MCC evaluation without grouper)
-# ---------------------------------------------------------------------------
-# Maps common principal ICD-10-CM codes to their base (without CC/MCC) DRG.
-# Used when drgpy is not installed so that ``get_drg`` and
-# ``analyze_cost_impact`` can still produce results for common diagnoses.
-_FALLBACK_ICD_TO_DRG: Dict[str, str] = {
-    "I50.9":  "293",  # Heart failure, unspecified → HF w/o CC/MCC
-    "I50.1":  "293",  # Left ventricular failure
-    "I50.20": "293",  # Systolic heart failure, unspecified
-    "J18.9":  "195",  # Pneumonia, unspecified → Simple pneumonia w/o CC/MCC
-    "J18.1":  "195",  # Lobar pneumonia, unspecified
-    "J44.1":  "179",  # COPD w/ acute exacerbation → Resp infections w/o CC/MCC
-    "I63.9":  "066",  # Cerebral infarction, unspecified → Stroke w/o CC/MCC
-    "I63.50": "066",  # Cerebral infarction, unspecified artery
-    "N17.9":  "685",  # Acute kidney failure, unspecified → Renal failure w/o CC/MCC
-    "E11.9":  "640",  # Type 2 diabetes w/o complications → Diabetes w/o CC/MCC
-    "E11.65": "639",  # Type 2 diabetes w/ hyperglycemia → Diabetes w/ CC
-    "A41.9":  "872",  # Sepsis, unspecified → Septicemia w/o MCC
-    "K92.2":  "380",  # GI hemorrhage, unspecified → GI hemorrhage w/o CC/MCC
-    "N39.0":  "691",  # Urinary tract infection → UTI w/o CC/MCC
-    "L03.90": "602",  # Cellulitis, unspecified → Cellulitis w/o MCC
-    "I48.91": "066",  # Atrial fibrillation → mapped to stroke family for demo
-    "I10":    "293",  # Essential hypertension → HF family (nearest match)
-    "R07.9":  "949",  # Chest pain, unspecified → Signs & symptoms w/o MCC
-}
-
-
-# ---------------------------------------------------------------------------
-# Fallback DRG weights for CI/testing (32 common medical DRGs)
-# ---------------------------------------------------------------------------
-
-def _get_fallback_weights() -> Dict[str, Dict]:
-    """
-    Built-in subset of DRG weights for offline use.
-
-    Covers the most common medical DRGs by volume (per HCUP data):
-    heart failure, septicemia, pneumonia, stroke, renal failure, diabetes,
-    GI hemorrhage, cellulitis, UTI, and signs/symptoms.
-    """
-    data = [
-        # (code, mdc, type, title, weight, geo_los, arith_los)
-        ("064", "01", "SURG", "Intracranial Hemorrhage Or Cerebral Infarction W MCC", 1.9117, 5.8, 7.2),
-        ("065", "01", "MED", "Intracranial Hemorrhage Or Cerebral Infarction W CC", 1.0619, 3.8, 4.7),
-        ("066", "01", "MED", "Intracranial Hemorrhage Or Cerebral Infarction W/O CC/MCC", 0.7175, 2.6, 3.1),
-        ("177", "04", "MED", "Respiratory Infections & Inflammations W MCC", 1.8729, 6.3, 7.8),
-        ("178", "04", "MED", "Respiratory Infections & Inflammations W CC", 1.2384, 4.7, 5.6),
-        ("179", "04", "MED", "Respiratory Infections & Inflammations W/O CC/MCC", 0.8463, 3.4, 4.0),
-        ("193", "04", "MED", "Simple Pneumonia & Pleurisy W MCC", 1.2935, 4.5, 5.5),
-        ("194", "04", "MED", "Simple Pneumonia & Pleurisy W CC", 0.8628, 3.4, 4.0),
-        ("195", "04", "MED", "Simple Pneumonia & Pleurisy W/O CC/MCC", 0.6142, 2.5, 3.0),
-        ("291", "05", "MED", "Heart Failure & Shock W MCC", 1.3968, 5.2, 6.3),
-        ("292", "05", "MED", "Heart Failure & Shock W CC", 0.9259, 3.9, 4.6),
-        ("293", "05", "MED", "Heart Failure & Shock W/O CC/MCC", 0.6521, 2.8, 3.3),
-        ("378", "06", "MED", "G.I. Hemorrhage W MCC", 1.5726, 4.5, 5.6),
-        ("379", "06", "MED", "G.I. Hemorrhage W CC", 0.9715, 3.1, 3.7),
-        ("380", "06", "MED", "G.I. Hemorrhage W/O CC/MCC", 0.6423, 2.1, 2.6),
-        ("469", "08", "SURG", "Major Hip And Knee Joint Replacement W MCC", 2.8156, 5.4, 6.8),
-        ("470", "08", "SURG", "Major Hip And Knee Joint Replacement W/O MCC", 1.6897, 2.0, 2.4),
-        ("602", "09", "MED", "Cellulitis W/O MCC", 0.7335, 3.4, 4.1),
-        ("603", "09", "MED", "Cellulitis W MCC", 1.2146, 4.8, 5.9),
-        ("638", "10", "MED", "Diabetes W MCC", 1.2856, 4.3, 5.2),
-        ("639", "10", "MED", "Diabetes W CC", 0.7816, 3.0, 3.6),
-        ("640", "10", "MED", "Diabetes W/O CC/MCC", 0.5495, 2.2, 2.6),
-        ("683", "11", "MED", "Renal Failure W MCC", 1.4763, 4.8, 5.9),
-        ("684", "11", "MED", "Renal Failure W CC", 0.8882, 3.3, 3.9),
-        ("685", "11", "MED", "Renal Failure W/O CC/MCC", 0.5936, 2.3, 2.8),
-        ("689", "11", "MED", "Kidney & Urinary Tract Infections W MCC", 1.1741, 4.3, 5.2),
-        ("690", "11", "MED", "Kidney & Urinary Tract Infections W CC", 0.8271, 3.3, 3.9),
-        ("691", "11", "MED", "Kidney & Urinary Tract Infections W/O CC/MCC", 0.5987, 2.6, 3.0),
-        ("871", "18", "MED", "Septicemia Or Severe Sepsis W/O MV >96 Hours W MCC", 1.8192, 5.5, 6.7),
-        ("872", "18", "MED", "Septicemia Or Severe Sepsis W/O MV >96 Hours W/O MCC", 1.0382, 3.7, 4.5),
-        ("948", "00", "MED", "Signs & Symptoms W MCC", 1.0847, 3.7, 4.5),
-        ("949", "00", "MED", "Signs & Symptoms W/O MCC", 0.6316, 2.4, 2.9),
-    ]
-    weights = {}
-    for code, mdc, drg_type, title, weight, geo, arith in data:
-        weights[code] = {
-            "title": title,
-            "mdc": mdc,
-            "type": drg_type,
-            "weight": weight,
-            "geo_los": geo,
-            "arith_los": arith,
-        }
-    return weights

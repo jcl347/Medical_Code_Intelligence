@@ -31,7 +31,15 @@ MODEL_CONFIGS = {
     },
     "gatortron-base": {
         "model_name": "UFNLP/gatortron-base",
-        "description": "GatorTron Base - pre-trained on 90B words of clinical text",
+        "description": "GatorTron Base (345M) - pre-trained on 90B words of clinical text",
+    },
+    "gatortron-medium": {
+        "model_name": "UFNLP/gatortron-medium",
+        "description": "GatorTron Medium (~1B) - larger variant pre-trained on clinical text",
+    },
+    "gatortron-large": {
+        "model_name": "UFNLP/gatortron-large",
+        "description": "GatorTron Large (~3.9B) - full-scale model, requires QLoRA for fine-tuning",
     },
 }
 
