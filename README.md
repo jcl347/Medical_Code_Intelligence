@@ -1,4 +1,5 @@
 # Medical Code Intelligence
+### by Jordan Limperis
 
 **ICD-10 NER system** for extracting diagnosis mentions from clinical text, resolving them to ICD-10-CM codes, estimating MS-DRG cost impact, with adversarial training, learned assertion detection, and physician shorthand expansion.
 
