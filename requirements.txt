@@ -24,7 +24,7 @@ pytest>=7.4.0
 pytest-cov>=4.1.0
 
 # Clinical coding
-drgpy>=0.3.0
+drgpy>=0.0.6
 
 # Optional: wandb for experiment tracking
 # wandb>=0.16.0
