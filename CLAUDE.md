@@ -7,7 +7,7 @@ Medical Code Intelligence is a production-grade clinical NLP system that solves 
 The system chains six stages into a single `MedicalCodingPipeline`:
 
 1. **Shorthand Expansion** — Expands physician abbreviations ("htn" -> "hypertension") using a 104K-entry meta-inventory with character offset tracking so downstream NER spans stay aligned.
-2. **Named Entity Recognition** — Transformer-based token classification (BIO scheme) trained on a 7-source composite dataset to detect DIAGNOSIS entities. Supports adversarial training (FGM/PGD) for +0.5-1.5% F1.
+2. **Named Entity Recognition** — Transformer-based token classification (BIO scheme) trained on an 8-source composite dataset to detect DIAGNOSIS entities. Supports adversarial training (FGM/PGD) for +0.5-1.5% F1.
 3. **Entity Post-Processing** — Filters stopword-only fragments and merges adjacent entity spans that were split by subword tokenization boundaries.
 4. **Assertion Detection** — Classifies each entity as affirmed, negated, possible, historical, hypothetical, or family-related. Two strategies: rule-based ConText/NegEx (122+ triggers, fast, no GPU) or transformer-based (bvanaken/clinical-assertion-negation-bert).
 5. **ICD-10-CM Resolution** — TF-IDF character n-gram matching against 51K ICD-10-CM code descriptions. Character 3/4-grams capture medical morphology ("cardio-", "-itis") without GPU.
@@ -30,7 +30,7 @@ src/
     _icd_fallback.py   Offline fallback: 45 common ICD codes for CI/testing
     _shorthand_fallback.py  Offline fallback: ~280 clinical abbreviations for CI/testing
   data/              # Dataset loading and preprocessing
-    icd_dataset.py     load_icd_ner_dataset() — composite dataset from 7 sources
+    icd_dataset.py     load_icd_ner_dataset() — composite dataset from 8 sources
     dataset_loader.py  load_ner_dataset() — HuggingFace dataset loading + span-to-BIO conversion
     preprocessing.py   tokenize_and_align_labels() — subword label alignment
     data_utils.py      create_data_collator(), split_long_sentences()
@@ -143,17 +143,18 @@ python scripts/train_gatortron_qlora.py --model UFNLP/gatortron-large --lora-ran
 | `jnlpba` | JNLPBA 2004 | Biomedical entity types |
 | `biomed_ner` | knowledgator/biomed_NER | Clinical spans |
 
-### ICD NER Composite Dataset (7 Sources)
+### ICD NER Composite Dataset (8 Sources)
 
-The `icd_ner` dataset merges seven sources with unified DIAGNOSIS labels:
+The `icd_ner` dataset merges eight sources with unified DIAGNOSIS labels:
 
 1. **NCBI Disease** — 6.9K sentences from PubMed abstracts
 2. **BC5CDR disease subset** — 1.5K abstracts (chemical entities filtered out)
 3. **BioMed NER DISORDER/PHENOTYPE** — clinical case reports from knowledgator/biomed_NER
 4. **ADE Corpus V2** — adverse drug effect spans from ade_corpus_v2
 5. **Curated ICD examples** — 80+ hand-crafted + ~100 template-generated sentences targeting common NER failure patterns (abbreviations, multi-word boundaries, lab value confusion, negation contexts, rare diseases, high-frequency ICD codes)
-6. **MedMentions** (optional) — up to 5K examples from 4,392 PubMed abstracts with 350K+ UMLS entity mentions, filtered for disease/disorder semantic types (T047, T048, T019, T046, T191)
-7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack
+6. **MedMentions** (optional) — up to 5K examples from ibm/MedMentions-ZS (29K pre-tokenized PubMed abstracts with UMLS BIO tags). Disease entities (T038) mapped to DIAGNOSIS. Falls back to bigbio/medmentions parquet if unavailable.
+7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack. Loaded via direct JSON download (bypasses deprecated HuggingFace loading script).
+8. **Curated discharge summary examples** — 30+ hand-crafted sentences targeting DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, and discharge summary formatting patterns
 
 Sources 6 and 7 download from HuggingFace on first use and fall back gracefully if unavailable.
 
@@ -223,11 +224,11 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 - **CC/MCC Tiers**: Secondary diagnoses that increase severity and payment
 - **Revenue at Risk**: Payment gap between current DRG and optimal CC/MCC capture
 
-**Pipeline integration**: When `resolve_drg=True`, the pipeline collects ICD codes from all affirmed entities, runs DRG grouping, and attaches cost analysis to the primary diagnosis entity.
+**Pipeline integration**: When `resolve_drg=True`, the pipeline collects ICD codes from all affirmed, historical, and possible entities (negated and family-history entities are excluded), runs DRG grouping, and attaches cost analysis to the primary diagnosis entity. Historical diagnoses (PMH, "history of...") are included because they affect CC/MCC severity tiers and DRG payment.
 
 **Data sources**:
-- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights (auto-downloaded from CMS.gov on first use, cached locally at `~/.cache/medical_code_intelligence/`). Can also load from a local Excel file via `table5_path`. Override download URL via `CMS_TABLE5_URL` environment variable.
-- `drgpy` library for ICD-10 to MS-DRG grouper logic (optional, `pip install drgpy`)
+- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights (auto-downloaded from CMS.gov on first use, cached locally at `~/.cache/medical_code_intelligence/`). Uses fallback URLs to handle CMS's inconsistent naming conventions across fiscal years. Can also load from a local Excel file via `table5_path`. Override download URL via `CMS_TABLE5_URL` environment variable.
+- `drgpy` library (v0.0.6) for ICD-10 to MS-DRG grouper logic (optional, `pip install drgpy`). Note: drgpy supports MS-DRG v40 (FY 2023); CMS is on v42/v43 (FY 2025/2026). DRG assignments are approximate for research/NLP use.
 - FY 2026 national standardized amount: $6,752.61
 
 ```python
@@ -291,19 +292,37 @@ Based on: Hu et al. (2022) — LoRA, Dettmers et al. (2023) — QLoRA.
 
 ## Multi-Model Training Comparison
 
-The notebook (`notebooks/demo_all_components.ipynb`, Section 17) trains all five BERT-family models on the full ICD NER dataset and compares entity-level F1:
+The notebook (`notebooks/demo_all_components.ipynb`, Section 17) trains all four 110M-parameter BERT-family models on the full ICD NER composite dataset and compares entity-level F1:
 
-| Model | Params | Batch Size | Notes |
-|-------|--------|------------|-------|
-| PubMedBERT | 110M | 16 | BLURB SOTA, strong all-around |
-| BioBERT | 110M | 16 | PubMed literature baseline |
-| Bio_ClinicalBERT | 110M | 16 | Best for clinical note text |
-| SciBERT | 110M | 16 | Scientific domain coverage |
-| GatorTron-base | 345M | 8 (grad_accum=2) | Largest fully-trainable model |
+| Model | Params | Batch Size | Eff. Batch | Notes |
+|-------|--------|------------|------------|-------|
+| PubMedBERT | 110M | 16 | 32 | BLURB SOTA, strong all-around |
+| BioBERT | 110M | 16 | 32 | PubMed literature baseline |
+| Bio_ClinicalBERT | 110M | 16 | 32 | Best for clinical note text |
+| SciBERT | 110M | 16 | 32 | Scientific domain coverage |
 
-All models train for 20 epochs with early stopping (patience=5), FP16 when CUDA is available, and the same hyperparameters (LR=5e-5, warmup=10%, max_seq_length=512). GatorTron uses smaller batch size with gradient accumulation to fit in memory. GPU memory is freed between models via `gc.collect()` + `torch.cuda.empty_cache()`.
+### Production Training Protocol
 
-The best model by F1 is automatically used in the Section 18 pipeline demo (shorthand -> NER -> negation -> ICD -> DRG).
+The notebook uses production-grade hyperparameters tuned for the 8-source composite dataset:
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| Data split | Train+Val merged → 90/10 internal split; Test held out | Maximum training data with clean early-stopping signal |
+| Learning rate | 2e-5 | Lower LR improves generalization on noisy composite data |
+| LR scheduler | Cosine annealing | Smoother decay than linear; avoids premature LR collapse |
+| Effective batch size | 32 (16 × 2 grad accum) | Larger batch stabilizes gradients across heterogeneous sources |
+| Label smoothing | 0.05 | Regularizes against annotation inconsistencies across sources |
+| Eval frequency | Every 100 steps | Catches transient F1 improvements |
+| Early stopping | Patience 10 | Prevents premature stopping on noisy composite F1 |
+| Max epochs | 30 | More room to converge; early stopping selects the peak |
+| Warmup | 10% | Standard warmup ratio |
+| Weight decay | 0.01 | L2 regularization |
+
+Key differences from CLI defaults (which use LR=5e-5, linear scheduler, patience=5): the notebook protocol is optimized for the composite dataset's heterogeneous annotation quality, where default settings cause premature early stopping (~4 epochs) and suboptimal convergence.
+
+GPU memory is freed between models via `gc.collect()` + `torch.cuda.empty_cache()`. For GatorTron (345M+), use the dedicated QLoRA script.
+
+The best model by test F1 is automatically used in the Section 18 pipeline demo (shorthand -> NER -> negation -> ICD -> DRG).
 
 ## Architecture Decisions
 
@@ -312,7 +331,7 @@ The best model by F1 is automatically used in the Section 18 pipeline demo (shor
 - **TF-IDF character n-grams** for ICD linking: Character 3/4-grams capture medical morphology (e.g., "cardio-", "-itis"). Scales to 50K+ codes without GPU. Deterministic and interpretable.
 - **Dual negation strategies**: Rule-based (fast, deterministic, 122+ triggers, no GPU) and transformer-based (learned, handles edge cases). Default is rule-based.
 - **Adversarial training**: FGM/PGD perturbation on embeddings improves robustness and F1 with no architecture changes — just a training-time regularizer.
-- **7-source composite dataset**: Combines public corpora, clinical case reports, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion). Garbage labels from source corpora are cleaned automatically.
+- **8-source composite dataset**: Combines public corpora, clinical case reports, discharge summary examples, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion). Source 8 (discharge summary examples) specifically targets DRG-relevant diagnoses. Garbage labels from source corpora are cleaned automatically.
 - **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk. DRG weights sourced from CMS IPPS Table 5 (auto-downloaded).
 - **QLoRA for large models**: 4-bit quantization + LoRA adapters enable fine-tuning GatorTron (345M–3.9B params) with ~75% less GPU memory. Dedicated training script with config key resolution avoids complexity in the main training path.
 - **Offline fallbacks**: ICD codes and abbreviations have built-in fallback data for CI/testing. DRG weights require CMS Table 5 data (downloaded or provided locally).
@@ -375,7 +394,7 @@ Key test files:
 
 ## Notebooks
 
-The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all five BERT-family models on the ICD NER dataset.
+The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all four 110M-parameter BERT-family models on the ICD NER dataset with production-grade hyperparameters.
 
 ### Keeping the Notebook Up to Date
 
@@ -407,7 +426,8 @@ When making changes to the repository, update `README.md` to reflect those chang
 
 ## Common Pitfalls
 
-- The `icd_ner` dataset is built at runtime by merging up to 7 HuggingFace datasets. First load downloads ~500MB+. Subsequent loads use cache. Sources 6 (MedMentions) and 7 (MACCROBAT) are optional and skipped gracefully if unavailable.
+- The `icd_ner` dataset is built at runtime by merging up to 8 sources (5 HuggingFace datasets + 3 built-in). First load downloads ~500MB+. Subsequent loads use cache. Sources 6 (MedMentions) and 7 (MACCROBAT) are optional and skipped gracefully if unavailable. Source 8 (discharge summary examples) is built-in and always available.
+- MedMentions uses ibm/MedMentions-ZS (parquet, standard `load_dataset()`) as the primary source, with bigbio/medmentions parquet files as a fallback. MACCROBAT loads via direct JSON download from the repository (bypasses deprecated loading script).
 - GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Use `scripts/train_gatortron_qlora.py` for QLoRA fine-tuning (75% less memory), or reduce batch size / use gradient accumulation for full fine-tuning. GatorTron-medium (~1B) and GatorTron-large (~3.9B) should always use QLoRA.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.
@@ -416,4 +436,4 @@ When making changes to the repository, update `README.md` to reflect those chang
 - The `train_gatortron_qlora.py` script accepts both config keys (e.g., `gatortron-base`) and full HuggingFace IDs (e.g., `UFNLP/gatortron-base`). Keys are resolved via `MODEL_CONFIGS`.
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.
-- The notebook's Section 17 trains all models on the full ICD dataset for 20 epochs. On CPU this will be slow; GPU recommended for the training cells.
+- The notebook's Section 17 trains all models on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). On CPU this will be slow; GPU recommended for the training cells.

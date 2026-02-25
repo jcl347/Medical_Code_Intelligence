@@ -50,9 +50,28 @@ FY2026_STANDARDIZED_AMOUNT = 6752.61
 # Published by CMS as public-domain data at:
 #   https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps
 # Override via CMS_TABLE5_URL environment variable or table5_url constructor param.
+#
+# NOTE: CMS uses inconsistent URL naming across fiscal years. We maintain a
+# list of fallback URLs that are tried in order. The first successful download
+# is cached locally. Override with CMS_TABLE5_URL env var for a specific URL.
 _DEFAULT_CMS_TABLE5_URL = os.environ.get(
     "CMS_TABLE5_URL",
+    "https://www.cms.gov/files/zip/fy2026-ipps-fr-table-5.zip",
+)
+
+# Fallback URLs tried in order when the primary URL fails.
+# CMS naming conventions vary: fy2026 vs fy-2026, ipps-fr vs ipps-final-rule.
+_CMS_TABLE5_FALLBACK_URLS = [
+    "https://www.cms.gov/files/zip/fy2026-ipps-fr-table-5.zip",
+    "https://www.cms.gov/files/zip/fy-2025-ipps-final-rule-table-5.zip",
+    "https://www.cms.gov/files/zip/fy-2026-ipps-final-rule-table-5.zip",
     "https://www.cms.gov/files/zip/fy-2026-fr-table-5.zip",
+]
+
+# drgpy grouper version gap warning
+_DRGPY_VERSION_NOTE = (
+    "drgpy supports MS-DRG v40 (FY 2023). CMS is on MS-DRG v42/v43 "
+    "(FY 2025/2026). DRG assignments are approximate for research/NLP use."
 )
 
 # Local cache directory for downloaded CMS data
@@ -298,6 +317,7 @@ class DRGCostEstimator:
             from drgpy.msdrg import DRGEngine
             self._grouper = DRGEngine(version=version)
             logger.info("Initialized drgpy DRG grouper %s", version)
+            logger.info(_DRGPY_VERSION_NOTE)
         except ImportError:
             logger.warning(
                 "drgpy not installed (pip install drgpy). "
@@ -393,16 +413,38 @@ class DRGCostEstimator:
         Downloads the zip file from CMS.gov, extracts the Excel file,
         and saves it to the cache directory for future use.
 
+        Tries the primary URL first, then falls back to alternative URLs
+        because CMS uses inconsistent naming conventions across fiscal years.
+
         Returns
         -------
         str or None
-            Path to the cached Excel file, or None if download failed.
+            Path to the cached Excel file, or None if all downloads failed.
         """
-        url = self._table5_url
         cache_path = os.path.join(self._cache_dir, "cms_table5.xlsx")
 
+        # Build list of URLs to try: primary first, then fallbacks
+        urls_to_try = [self._table5_url]
+        for fallback in _CMS_TABLE5_FALLBACK_URLS:
+            if fallback not in urls_to_try:
+                urls_to_try.append(fallback)
+
+        os.makedirs(self._cache_dir, exist_ok=True)
+
+        for url in urls_to_try:
+            result = self._try_download_url(url, cache_path)
+            if result is not None:
+                return result
+
+        logger.warning(
+            "Failed to download CMS Table 5 from all URLs. Tried: %s",
+            urls_to_try,
+        )
+        return None
+
+    def _try_download_url(self, url: str, cache_path: str) -> Optional[str]:
+        """Try downloading CMS Table 5 from a single URL."""
         try:
-            os.makedirs(self._cache_dir, exist_ok=True)
             logger.info("Downloading CMS IPPS Table 5 from %s ...", url)
 
             req = urllib.request.Request(
@@ -419,7 +461,7 @@ class DRGCostEstimator:
                         if f.lower().endswith(".xlsx")
                     ]
                     if not xlsx_files:
-                        logger.warning("No .xlsx file found in CMS zip archive")
+                        logger.warning("No .xlsx file found in CMS zip archive from %s", url)
                         return None
                     with zf.open(xlsx_files[0]) as src:
                         with open(cache_path, "wb") as dst:
@@ -428,11 +470,11 @@ class DRGCostEstimator:
                 with open(cache_path, "wb") as f:
                     f.write(data)
 
-            logger.info("CMS Table 5 cached at %s", cache_path)
+            logger.info("CMS Table 5 cached at %s (from %s)", cache_path, url)
             return cache_path
 
         except Exception as e:
-            logger.warning("Failed to download CMS Table 5: %s", e)
+            logger.debug("Failed to download CMS Table 5 from %s: %s", url, e)
             return None
 
     def _get_weight(self, drg_code: str) -> float:
@@ -486,7 +528,38 @@ class DRGCostEstimator:
     @staticmethod
     def _strip_severity(title: str) -> str:
         """Remove CC/MCC suffixes to get the base clinical condition title."""
-        return re.sub(
-            r"\s*(W|WITH|W/O|WITHOUT)\s*(MCC|CC|CC/MCC).*", "",
-            title, flags=re.IGNORECASE,
-        ).strip()
+        return _strip_severity(title)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper functions (used by DRGCostEstimator internally)
+# ---------------------------------------------------------------------------
+
+def _classify_severity(title: str) -> str:
+    """
+    Classify DRG severity level from its title.
+
+    CMS DRG titles use suffixes like "W MCC", "W CC", "W/O CC/MCC"
+    to indicate severity tiers.
+
+    Returns
+    -------
+    str
+        One of: ``"mcc"``, ``"cc"``, ``"base"``
+    """
+    title_upper = title.upper()
+    # Match "W MCC" or "WITH MCC" but not "W/O MCC"
+    if re.search(r"\bW(?:ITH)?\s+MCC\b", title_upper) and "W/O" not in title_upper:
+        return "mcc"
+    # Match "W CC" or "WITH CC" but not "W/O CC" and not "W MCC"
+    if re.search(r"\bW(?:ITH)?\s+CC\b", title_upper) and "W/O" not in title_upper and "MCC" not in title_upper:
+        return "cc"
+    return "base"
+
+
+def _strip_severity(title: str) -> str:
+    """Remove CC/MCC suffixes to get the base clinical condition title."""
+    return re.sub(
+        r"\s*(W|WITH|W/O|WITHOUT)\s*(MCC|CC|CC/MCC).*", "",
+        title, flags=re.IGNORECASE,
+    ).strip()

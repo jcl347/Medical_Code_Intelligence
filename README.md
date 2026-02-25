@@ -23,15 +23,16 @@ pip install -r requirements.txt
 
 ### Step 2: Train on the ICD NER Dataset
 
-The `icd_ner` dataset is a 7-source composite corpus with a unified `DIAGNOSIS` entity type:
+The `icd_ner` dataset is an 8-source composite corpus with a unified `DIAGNOSIS` entity type:
 
 1. **NCBI Disease** — 6.9K sentences from PubMed abstracts
 2. **BC5CDR disease subset** — 1.5K abstracts (chemical entities filtered out)
 3. **BioMed NER DISORDER/PHENOTYPE** — clinical case reports from `knowledgator/biomed_NER`
 4. **ADE Corpus V2** — adverse drug effect spans from `ade_corpus_v2`
 5. **Curated ICD examples** — 80+ hand-crafted + ~80 template-generated clinical sentences targeting common NER failure patterns (abbreviations, multi-word boundaries, lab value confusion, negation contexts, rare diseases, high-frequency ICD codes)
-6. **MedMentions** (optional) — up to 5K examples from 4,392 PubMed abstracts with 350K+ UMLS entity mentions, filtered for disease/disorder semantic types
-7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack
+6. **MedMentions** (optional) — up to 5K examples from `ibm/MedMentions-ZS` (29K pre-tokenized PubMed abstracts with UMLS BIO tags, disease entities T038 mapped to DIAGNOSIS; falls back to `bigbio/medmentions` parquet if unavailable)
+7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack (loaded via direct JSON download, bypassing deprecated HuggingFace loading script)
+8. **Curated discharge summary examples** — 30+ hand-crafted sentences targeting DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, and the formatting patterns found in real discharge summaries
 
 Sources 6 and 7 download from HuggingFace on first use and fall back gracefully if unavailable. Garbage labels (broken BIO annotations from source corpora) are automatically cleaned at load time. The model learns only to detect diagnosable conditions that map to ICD codes.
 
@@ -284,14 +285,14 @@ expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
 
 | Key | Source | Entity Types | Status |
 |-----|--------|-------------|--------|
-| **`icd_ner`** | **7-source composite (see below)** | **DIAGNOSIS** | **Recommended** |
+| **`icd_ner`** | **8-source composite (see below)** | **DIAGNOSIS** | **Recommended** |
 | `ncbi_disease` | NCBI Disease Corpus | Disease | Available |
 | `bc5cdr` | BioCreative V CDR | Chemical, Disease | Available |
 | `bc2gm` | BioCreative II GM | Gene | Available |
 | `jnlpba` | JNLPBA Shared Task | Protein, DNA, RNA, Cell_line, Cell_type | Available |
 | `biomed_ner` | knowledgator/biomed_NER | 24 types (DISORDER, CLINICAL_DRUG, ...) | Available (span format) |
 
-**`icd_ner`** is the recommended dataset for ICD coding. It merges seven sources and normalizes all disease/disorder entities to a single `DIAGNOSIS` label:
+**`icd_ner`** is the recommended dataset for ICD coding. It merges eight sources and normalizes all disease/disorder entities to a single `DIAGNOSIS` label:
 
 | # | Source | What it contributes |
 |---|--------|-------------------|
@@ -300,8 +301,9 @@ expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
 | 3 | BioMed NER DISORDER/PHENOTYPE | Clinical case reports with disorder and phenotype spans |
 | 4 | ADE Corpus V2 | Adverse drug effect spans (drug reactions as diagnoses) |
 | 5 | Curated ICD examples (80+ hand-crafted + ~80 template-generated) | Targets common NER failure patterns: abbreviations, multi-word boundaries, lab confusion, negation contexts, rare diseases, high-frequency ICD codes |
-| 6 | MedMentions (optional, up to 5K) | 4,392 PubMed abstracts, disease/disorder UMLS semantic types (T047, T048, T019, T046, T191) |
+| 6 | MedMentions (optional, up to 5K) | ibm/MedMentions-ZS: 29K pre-tokenized PubMed abstracts, disease UMLS type T038 mapped to DIAGNOSIS |
 | 7 | MACCROBAT (optional, up to 3K) | 200 clinical case reports with DISEASE_DISORDER entities — closes the PubMed-to-clinical domain gap |
+| 8 | Curated discharge summary examples (30+ sentences) | DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, discharge formatting patterns |
 
 Garbage labels (broken BIO tags on function words like "of", "and", "the") are automatically cleaned from all sources. The curated examples include negative training data (e.g. "blood pressure", "heart rate", "renal function") to reduce false positives on clinical measurements. Sources 6 and 7 are downloaded from HuggingFace on first use and skipped gracefully if unavailable.
 
@@ -339,6 +341,8 @@ For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are re
 
 `notebooks/demo_all_components.ipynb` demonstrates every pipeline component interactively — shorthand expansion, negation detection, ICD-10-CM linking, DRG cost estimation, entity post-processing, evaluation metrics, adversarial training, and the full end-to-end pipeline. All cells run on CPU using built-in fallback data (no GPU or network required).
 
+**Section 17 — Multi-Model Training Comparison**: Trains all four 110M BERT models (PubMedBERT, BioBERT, Bio_ClinicalBERT, SciBERT) on the full ICD NER composite dataset with production-grade hyperparameters: LR=2e-5, cosine scheduler, effective batch size 32, label smoothing 0.05, patience 10. Train+val data is merged for maximum training signal, with 10% held out for early stopping and the test set reserved for final comparison. See the [CLAUDE.md](CLAUDE.md) Multi-Model Training Comparison section for details.
+
 ```bash
 cd notebooks && jupyter notebook demo_all_components.ipynb
 ```
@@ -363,7 +367,7 @@ Medical_Code_Intelligence/
 │   │   ├── _icd_fallback.py       # Offline fallback ICD codes
 │   │   └── _shorthand_fallback.py # Built-in ~280 abbreviations
 │   ├── data/
-│   │   ├── icd_dataset.py         # ICD NER composite dataset loader (7 sources)
+│   │   ├── icd_dataset.py         # ICD NER composite dataset loader (8 sources)
 │   │   ├── dataset_loader.py      # HuggingFace dataset loaders + span→BIO
 │   │   ├── preprocessing.py       # Subword tokenization & label alignment
 │   │   └── data_utils.py          # Data collator, sliding window splitting
@@ -456,9 +460,11 @@ python scripts/train.py [OPTIONS]
 # Minimal: train PubMedBERT on ICD NER with all defaults
 python scripts/train.py --model pubmedbert --dataset icd_ner
 
-# Clinical model with tuned hyperparameters
+# Production-grade training for ICD NER composite dataset
+# (matches notebook Section 17 protocol)
 python scripts/train.py --model bio_clinicalbert --dataset icd_ner \
-    --lr 3e-5 --epochs 15 --patience 3 --scheduler cosine
+    --lr 2e-5 --epochs 30 --patience 10 --scheduler cosine \
+    --grad-accum 2 --label-smoothing 0.05 --eval-steps 100
 
 # GatorTron with reduced batch size (345M params needs more memory)
 python scripts/train.py --model gatortron-base --dataset icd_ner \
@@ -827,15 +833,17 @@ The `DRGCostEstimator` (`src/clinical/drg_costs.py`) maps ICD-10-CM codes to Med
 | **Base Rate** | FY 2026 national standardized amount: $6,752.61 |
 
 **Pipeline integration:** When `resolve_drg=True`, the pipeline:
-1. Collects ICD codes from all affirmed (non-negated) entities
+1. Collects ICD codes from all affirmed, historical, and possible entities (negated and family-history entities are excluded)
 2. Groups them into an MS-DRG via drgpy
 3. Finds related CC/MCC severity-tier variants
 4. Calculates revenue at risk from undercoding
 5. Attaches the cost analysis to the primary diagnosis entity
 
+Historical diagnoses (PMH, "history of...") are included because they affect CC/MCC severity tiers and DRG payment in real clinical coding. Only truly negated entities ("denies fever") and family-history entities ("family history of cancer") are excluded from DRG grouping.
+
 **Data sources:**
-- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights, auto-downloaded from CMS.gov on first use and cached locally at `~/.cache/medical_code_intelligence/`. Can also load from a local Excel file via `table5_path` parameter. Override download URL via `CMS_TABLE5_URL` environment variable.
-- `drgpy` library for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`)
+- **CMS IPPS Table 5** — All ~770 MS-DRG relative weights, auto-downloaded from CMS.gov on first use and cached locally at `~/.cache/medical_code_intelligence/`. The download uses fallback URLs to handle CMS's inconsistent naming conventions across fiscal years. Can also load from a local Excel file via `table5_path` parameter. Override download URL via `CMS_TABLE5_URL` environment variable.
+- `drgpy` library (v0.0.6) for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`). Note: drgpy supports MS-DRG v40 (FY 2023); CMS is on v42/v43 (FY 2025/2026). DRG assignments are approximate for research/NLP use.
 
 ## How the ICD Entity Linker Works
 
@@ -867,7 +875,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 
 **Adversarial training (FGM/PGD)**: Perturbs word embeddings in the direction of the loss gradient during training, then trains on both clean and perturbed inputs. This regularizes the model against small input variations, improving entity-level F1 by +0.5-1.5% on biomedical NER benchmarks with no architecture changes.
 
-**7-source composite ICD NER dataset**: Merging seven sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, curated clinical examples, MedMentions, and MACCROBAT) gives broad coverage of diagnosable conditions across PubMed abstracts and clinical notes. Template-generated examples target documented NER failure patterns (abbreviations, boundary errors, lab confusion). Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
+**8-source composite ICD NER dataset**: Merging eight sources (NCBI Disease, BC5CDR, BioMed NER disorders, ADE Corpus adverse effects, curated clinical examples, MedMentions, MACCROBAT, and curated discharge summary examples) gives broad coverage of diagnosable conditions across PubMed abstracts, clinical notes, and discharge summaries. Template-generated examples target documented NER failure patterns (abbreviations, boundary errors, lab confusion). Discharge summary examples specifically target DRG-relevant diagnoses (CC/MCC comorbidities, hospital-acquired conditions). Garbage labels from source corpora are cleaned automatically, and curated negative examples reduce false positives on clinical measurements. A single `DIAGNOSIS` label keeps the model focused on the ICD-relevant task.
 
 **MS-DRG cost scoping**: Maps extracted ICD codes to Medicare Severity Diagnosis Related Groups (~770 payment categories) and compares CC/MCC severity tiers to quantify revenue at risk from undercoding. DRG weights are sourced from CMS IPPS Table 5 (auto-downloaded from CMS.gov).
 
@@ -881,9 +889,10 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | ICD NER training | BC5CDR (tner/bc5cdr) | CC BY 4.0 | 1.5K abstracts |
 | ICD NER training | BioMed NER (knowledgator/biomed_NER) | Apache 2.0 | 500 case reports |
 | ICD NER training | ADE Corpus V2 (ade_corpus_v2) | Public domain | Drug-effect spans |
-| ICD NER training | MedMentions (bigbio/medmentions) | CC0 1.0 | 4,392 abstracts |
+| ICD NER training | MedMentions (ibm/MedMentions-ZS) | CC0 1.0 | 29K abstracts |
 | ICD NER training | MACCROBAT (singh-aditya/MACCROBAT_biomedical_ner) | CC BY 4.0 | 200 case reports |
 | ICD NER training | Curated + template-generated examples | Project-internal | ~160 sentences |
+| ICD NER training | Curated discharge summary examples | Project-internal | ~30 sentences |
 | ICD-10-CM codes | [atta00/icd10-codes](https://huggingface.co/datasets/atta00/icd10-codes) | MIT | 51,438 |
 | MS-DRG grouper | [drgpy](https://pypi.org/project/drgpy/) | Apache 2.0 | ~770 DRGs |
 | DRG weights | [CMS IPPS Table 5](https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps) (FY 2026, auto-downloaded) | Public domain | ~770 DRGs |
