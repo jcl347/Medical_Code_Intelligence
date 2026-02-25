@@ -131,12 +131,15 @@ def load_icd_ner_dataset(
     """
     Load the composite ICD NER dataset.
 
-    Merges five sources with unified DIAGNOSIS labels:
+    Merges eight sources with unified DIAGNOSIS labels:
     1. NCBI Disease Corpus (PubMed abstracts)
     2. BC5CDR disease subset (PubMed articles)
     3. BioMed NER DISORDER entities (clinical case reports)
     4. ADE Corpus V2 adverse effect entities
     5. Curated clinical ICD examples
+    6. MedMentions (optional, disease semantic types from PubMed)
+    7. MACCROBAT (optional, clinical case reports)
+    8. Curated discharge summary examples (DRG-relevant diagnoses)
 
     Parameters
     ----------
@@ -191,12 +194,12 @@ def load_icd_ner_dataset(
         logger.warning("  Could not load ADE Corpus V2: %s (skipping)", e)
 
     # --- Source 5: Curated ICD clinical examples (hand-crafted + template-generated) ---
-    logger.info("  [5/7] Adding curated ICD clinical examples...")
+    logger.info("  [5/8] Adding curated ICD clinical examples...")
     curated = _get_curated_icd_examples()
     all_sources.append(("curated_icd", curated))
 
     # --- Source 6: MedMentions (Disease/Disorder semantic types) ---
-    logger.info("  [6/7] Loading MedMentions (disease semantic types)...")
+    logger.info("  [6/8] Loading MedMentions (disease semantic types)...")
     try:
         medmentions = _load_medmentions_diseases(cache_dir=cache_dir)
         all_sources.append(("medmentions", medmentions))
@@ -204,12 +207,17 @@ def load_icd_ner_dataset(
         logger.warning("  Could not load MedMentions: %s (skipping)", e)
 
     # --- Source 7: MACCROBAT (clinical case DISEASE_DISORDER entities) ---
-    logger.info("  [7/7] Loading MACCROBAT clinical case reports...")
+    logger.info("  [7/8] Loading MACCROBAT clinical case reports...")
     try:
         maccrobat = _load_maccrobat_diseases(cache_dir=cache_dir)
         all_sources.append(("maccrobat", maccrobat))
     except Exception as e:
         logger.warning("  Could not load MACCROBAT: %s (skipping)", e)
+
+    # --- Source 8: Curated discharge summary examples (DRG-relevant) ---
+    logger.info("  [8/8] Adding curated discharge summary examples...")
+    discharge = _get_discharge_summary_examples()
+    all_sources.append(("discharge_summaries", discharge))
 
     # --- Clean garbage labels from all sources ---
     logger.info("  Cleaning garbage labels from all sources...")
@@ -1007,17 +1015,16 @@ def _load_medmentions_diseases(
     MedMentions has 4,392 PubMed abstracts with 350K+ UMLS entity mentions
     annotated at 97.3% inter-annotator agreement.  We filter for disease-related
     semantic types and convert to DIAGNOSIS BIO tags.
+
+    Loading strategy:
+    The bigbio/medmentions HuggingFace dataset uses a loading script that is
+    no longer supported by the ``datasets`` library (>=4.x). We load the
+    pre-converted Parquet files directly from the ``refs/convert/parquet``
+    branch of the repository, which bypasses the deprecated loading script.
+    Falls back to reading cached Parquet files via ``pyarrow`` if the
+    ``datasets`` library approach also fails due to schema mismatches.
     """
-    try:
-        raw = load_dataset(
-            "bigbio/medmentions", "medmentions_st21pv_bigbio_kb",
-            cache_dir=cache_dir, trust_remote_code=True,
-        )
-    except Exception:
-        raw = load_dataset(
-            "bigbio/medmentions", "medmentions_full_bigbio_kb",
-            cache_dir=cache_dir, trust_remote_code=True,
-        )
+    raw = _load_medmentions_parquet(cache_dir)
 
     all_tokens: List[List[str]] = []
     all_tags: List[List[int]] = []
@@ -1051,14 +1058,24 @@ def _load_medmentions_diseases(
             disease_entities = []
             for ent in entities:
                 is_disease = False
-                ent_type = ent.get("type", "")
-                if ent_type in _MEDMENTIONS_DISEASE_TYPES:
+                # Source-format parquet uses semantic_type_id directly
+                sem_types = ent.get("semantic_type_id", [])
+                if isinstance(sem_types, list):
+                    if any(st in _MEDMENTIONS_DISEASE_TYPES for st in sem_types):
+                        is_disease = True
+                elif sem_types in _MEDMENTIONS_DISEASE_TYPES:
                     is_disease = True
-                else:
-                    for norm in ent.get("normalized", []):
-                        if norm.get("db_name", "") in _MEDMENTIONS_DISEASE_TYPES:
-                            is_disease = True
-                            break
+
+                # BigBio KB format uses type + normalized
+                if not is_disease:
+                    ent_type = ent.get("type", "")
+                    if ent_type in _MEDMENTIONS_DISEASE_TYPES:
+                        is_disease = True
+                    else:
+                        for norm in ent.get("normalized", []):
+                            if norm.get("db_name", "") in _MEDMENTIONS_DISEASE_TYPES:
+                                is_disease = True
+                                break
 
                 if is_disease:
                     for offset_pair in ent.get("offsets", []):
@@ -1105,6 +1122,66 @@ def _load_medmentions_diseases(
     return result
 
 
+def _load_medmentions_parquet(
+    cache_dir: Optional[str] = None,
+) -> Dict[str, list]:
+    """
+    Load MedMentions ST21pv source parquet files directly.
+
+    The bigbio/medmentions dataset uses a deprecated loading script.
+    This function downloads the pre-converted Parquet files from the
+    ``refs/convert/parquet`` branch and reads them with ``pyarrow``,
+    bypassing the broken ``load_dataset()`` path entirely.
+
+    Returns a dict mapping split names to lists of example dicts.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        raise RuntimeError(
+            "huggingface_hub is required to load MedMentions. "
+            "Install it with: pip install huggingface_hub"
+        )
+
+    import pyarrow.parquet as pq
+
+    splits: Dict[str, list] = {}
+    for split_name in ["train", "validation", "test"]:
+        filename = f"medmentions_st21pv_source/{split_name}/0000.parquet"
+        try:
+            path = hf_hub_download(
+                repo_id="bigbio/medmentions",
+                filename=filename,
+                repo_type="dataset",
+                revision="refs/convert/parquet",
+                cache_dir=cache_dir,
+            )
+            table = pq.read_table(path)
+            rows = table.to_pydict()
+            # Convert columnar dict to list of row dicts
+            n_rows = len(rows[list(rows.keys())[0]])
+            split_data = []
+            for i in range(n_rows):
+                split_data.append({k: rows[k][i] for k in rows})
+            splits[split_name] = split_data
+            logger.info(
+                "  MedMentions %s: loaded %d documents from parquet",
+                split_name, len(split_data),
+            )
+        except Exception as e:
+            logger.warning(
+                "  Could not load MedMentions %s parquet: %s", split_name, e,
+            )
+
+    if not splits:
+        raise RuntimeError(
+            "Could not load any MedMentions splits from parquet. "
+            "The bigbio/medmentions dataset requires parquet files from "
+            "the refs/convert/parquet branch."
+        )
+    return splits
+
+
 # ---------------------------------------------------------------------------
 # Source 7: MACCROBAT — Disease entities from clinical case reports
 # ---------------------------------------------------------------------------
@@ -1123,43 +1200,53 @@ def _load_maccrobat_diseases(
 
     MACCROBAT provides 200 clinical case reports with clinical-note-style
     text, directly addressing the domain gap from PubMed abstracts.
+
+    Loading strategy:
+    The singh-aditya/MACCROBAT_biomedical_ner HuggingFace dataset uses a
+    loading script that is no longer supported by the ``datasets`` library
+    (>=4.x). We download the JSON data file directly from the repository
+    and parse it ourselves, bypassing the deprecated loading script.
     """
-    raw = load_dataset(
-        "singh-aditya/MACCROBAT_biomedical_ner", cache_dir=cache_dir,
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        raise RuntimeError(
+            "huggingface_hub is required to load MACCROBAT. "
+            "Install it with: pip install huggingface_hub"
+        )
+
+    import json
+
+    json_path = hf_hub_download(
+        repo_id="singh-aditya/MACCROBAT_biomedical_ner",
+        filename="MACCROBAT2020-V2.json",
+        repo_type="dataset",
+        cache_dir=cache_dir,
     )
+    with open(json_path) as f:
+        data = json.load(f)
+
+    label_names = data.get("all_ner_labels", [])
+    documents = data.get("data", [])
+    if not label_names or not documents:
+        raise RuntimeError("MACCROBAT JSON has unexpected structure")
 
     all_tokens: List[List[str]] = []
     all_tags: List[List[int]] = []
     all_labels: List[List[str]] = []
 
-    split_name = "train" if "train" in raw else list(raw.keys())[0]
-
-    # Resolve label names from dataset features
-    tag_feature = raw[split_name].features.get("ner_tags", None)
-    label_names = None
-    if tag_feature is not None and hasattr(tag_feature, "feature"):
-        inner = tag_feature.feature
-        if hasattr(inner, "names"):
-            label_names = inner.names
-
-    if label_names is None:
-        raise RuntimeError("Cannot resolve MACCROBAT label names from features")
-
-    for i, example in enumerate(raw[split_name]):
+    for i, doc in enumerate(documents):
         if i >= max_examples:
             break
 
-        tokens = example.get("tokens", [])
-        ner_tags = example.get("ner_tags", [])
-        if not tokens or not ner_tags:
+        tokens = doc.get("tokens", [])
+        ner_labels_raw = doc.get("ner_labels", [])
+        if not tokens or not ner_labels_raw:
             continue
 
+        # Map original labels to DIAGNOSIS
         mapped_labels = []
-        for tag_id in ner_tags:
-            if tag_id < 0 or tag_id >= len(label_names):
-                mapped_labels.append("O")
-                continue
-            label = label_names[tag_id]
+        for label in ner_labels_raw:
             label_upper = label.upper().replace("-", "_")
 
             prefix = ""
@@ -1184,8 +1271,13 @@ def _load_maccrobat_diseases(
                 if j == 0 or mapped_labels[j - 1] == "O":
                     mapped_labels[j] = "B-DIAGNOSIS"
 
+        # Ensure tokens and labels are the same length
+        min_len = min(len(tokens), len(mapped_labels))
+        tokens = [str(t) for t in tokens[:min_len]]
+        mapped_labels = mapped_labels[:min_len]
+
         if any(l.startswith("B-") for l in mapped_labels):
-            all_tokens.append(list(tokens))
+            all_tokens.append(tokens)
             all_labels.append(mapped_labels)
             all_tags.append([ICD_NER_LABEL2ID[lab] for lab in mapped_labels])
 
@@ -1212,3 +1304,130 @@ def _load_maccrobat_diseases(
     n_entities = sum(lab.startswith("B-") for row in all_labels for lab in row)
     logger.info("  MACCROBAT: %d examples, %d DIAGNOSIS entities", n, n_entities)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Source 8: Curated discharge summary examples — DRG-relevant diagnoses
+# ---------------------------------------------------------------------------
+
+_DISCHARGE_SUMMARY_EXAMPLES: List[Dict] = [
+    # --- CC/MCC diagnoses that shift DRG severity tiers ---
+    # These target high-value diagnoses frequently under-captured in NER
+    {"tokens": ["Discharge", "diagnosis", ":", "acute", "respiratory", "failure", "with", "hypoxia"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+    {"tokens": ["Principal", "diagnosis", ":", "severe", "sepsis", "due", "to", "urinary", "tract", "infection"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Patient", "admitted", "for", "acute", "ST-elevation", "myocardial", "infarction"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Secondary", "diagnoses", ":", "acute", "kidney", "injury", ",", "hyperkalemia", ",", "metabolic", "acidosis"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Complicated", "by", "hospital-acquired", "pneumonia", "and", "Clostridium", "difficile", "infection"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Discharge", "summary", ":", "encephalopathy", "secondary", "to", "hepatic", "failure"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Primary", ":", "decompensated", "heart", "failure", "with", "cardiogenic", "shock"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Acute", "exacerbation", "of", "chronic", "obstructive", "pulmonary", "disease", "requiring", "intubation"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "O"]},
+    {"tokens": ["Diagnoses", "at", "discharge", ":", "diabetic", "ketoacidosis", ",", "type", "1", "diabetes", "mellitus"],
+     "labels": ["O", "O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Final", "diagnosis", ":", "pulmonary", "embolism", "with", "right", "heart", "strain"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+
+    # --- Inpatient co-morbidities (CC/MCC impact on DRG payment) ---
+    {"tokens": ["Comorbidities", ":", "morbid", "obesity", ",", "obstructive", "sleep", "apnea", ",", "hypertension"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+    {"tokens": ["Additional", ":", "protein-calorie", "malnutrition", ",", "pressure", "ulcer", "stage", "3"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "O"]},
+    {"tokens": ["Other", ":", "chronic", "systolic", "heart", "failure", ",", "atrial", "fibrillation", ",", "CKD", "stage", "4"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "O", "O"]},
+    {"tokens": ["Coagulopathy", "secondary", "to", "warfarin", "use", "with", "INR", "5.2"],
+     "labels": ["B-DIAGNOSIS", "O", "O", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Altered", "mental", "status", "likely", "secondary", "to", "uremic", "encephalopathy"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Ventilator-associated", "pneumonia", "with", "acute", "respiratory", "distress", "syndrome"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Postoperative", "wound", "infection", "with", "dehiscence"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+    {"tokens": ["Catheter-associated", "urinary", "tract", "infection", "with", "urosepsis"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+
+    # --- Historical and family contexts in discharge summaries ---
+    {"tokens": ["Past", "medical", "history", ":", "coronary", "artery", "disease", ",", "prior", "CABG", ",", "diabetes"],
+     "labels": ["O", "O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O", "O", "B-DIAGNOSIS"]},
+    {"tokens": ["History", "significant", "for", "chronic", "hepatitis", "C", "and", "liver", "cirrhosis"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["Family", "history", "of", "premature", "coronary", "artery", "disease"],
+     "labels": ["O", "O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+    {"tokens": ["PMH", ":", "HTN", ",", "DM2", ",", "CKD", "3", ",", "HFrEF", ",", "AFib"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS", "O", "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+
+    # --- Procedure-related diagnoses (affect surgical DRGs) ---
+    {"tokens": ["Admitted", "for", "acute", "cholecystitis", ",", "underwent", "laparoscopic", "cholecystectomy"],
+     "labels": ["O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O", "O"]},
+    {"tokens": ["Small", "bowel", "obstruction", "requiring", "surgical", "lysis", "of", "adhesions"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Hip", "fracture", "status", "post", "open", "reduction", "internal", "fixation"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Spinal", "stenosis", "with", "neurogenic", "claudication", "treated", "with", "laminectomy"],
+     "labels": ["B-DIAGNOSIS", "I-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "O", "O", "O"]},
+
+    # --- Multi-diagnosis discharge summaries ---
+    {"tokens": ["Discharge", "diagnoses", ":", "1.", "Pneumonia", "2.", "Acute", "kidney", "injury",
+                 "3.", "Hypernatremia", "4.", "Delirium"],
+     "labels": ["O", "O", "O", "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS",
+                 "O", "B-DIAGNOSIS", "O", "B-DIAGNOSIS"]},
+    {"tokens": ["Problems", "addressed", ":", "congestive", "heart", "failure", "exacerbation", ",",
+                 "acute", "on", "chronic", "kidney", "disease", ",", "anemia", "of", "chronic", "disease"],
+     "labels": ["O", "O", "O", "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O",
+                 "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "O",
+                 "B-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS", "I-DIAGNOSIS"]},
+
+    # --- Negative examples from discharge summaries ---
+    {"tokens": ["Medications", "at", "discharge", ":", "metoprolol", "25mg", "BID", ",", "lisinopril", "10mg"],
+     "labels": ["O", "O", "O", "O", "O", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Follow", "up", "with", "PCP", "in", "1", "week", "and", "cardiology", "in", "2", "weeks"],
+     "labels": ["O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Condition", "at", "discharge", ":", "stable", ",", "improved"],
+     "labels": ["O", "O", "O", "O", "O", "O", "O"]},
+    {"tokens": ["Vitals", "on", "discharge", ":", "BP", "128/76", ",", "HR", "72", ",", "O2", "sat", "96%"],
+     "labels": ["O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O"]},
+]
+
+
+def _get_discharge_summary_examples() -> DatasetDict:
+    """
+    Build a DatasetDict from curated discharge summary examples.
+
+    These target DRG-relevant diagnoses: principal diagnoses, CC/MCC
+    comorbidities, hospital-acquired conditions, and the specific
+    formatting patterns found in discharge summaries (numbered lists,
+    abbreviations, historical contexts).
+
+    This source fills the domain gap between PubMed abstracts (academic
+    language) and real clinical discharge notes (terse, list-heavy,
+    abbreviation-dense) — the primary input for DRG assignment.
+    """
+    all_tokens = [ex["tokens"] for ex in _DISCHARGE_SUMMARY_EXAMPLES]
+    all_labels = [ex["labels"] for ex in _DISCHARGE_SUMMARY_EXAMPLES]
+    all_tags = [
+        [ICD_NER_LABEL2ID[lab] for lab in labs]
+        for labs in all_labels
+    ]
+
+    # Duplicate 3x to increase weight (matches curated ICD examples strategy)
+    n_repeats = 3
+    ds = Dataset.from_dict({
+        "tokens": all_tokens * n_repeats,
+        "ner_tags": all_tags * n_repeats,
+        "ner_labels": all_labels * n_repeats,
+    })
+
+    n_examples = len(_DISCHARGE_SUMMARY_EXAMPLES)
+    n_entities = sum(lab.startswith("B-") for row in all_labels for lab in row)
+    logger.info(
+        "  Discharge summaries: %d examples (%dx repeat), %d unique DIAGNOSIS entities",
+        n_examples, n_repeats, n_entities,
+    )
+
+    return DatasetDict({"train": ds})

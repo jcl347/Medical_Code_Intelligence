@@ -273,10 +273,15 @@ class MedicalCodingPipeline:
 
         # Step 6: MS-DRG cost estimation
         if self.drg_estimator is not None and results:
-            # Collect ICD codes from all affirmed entities for DRG grouping
+            # Collect ICD codes for DRG grouping.
+            # Include affirmed AND historical entities as secondary diagnoses —
+            # historical conditions (PMH, "history of...") affect CC/MCC severity
+            # tiers and DRG payment. Only truly negated and family-history
+            # entities are excluded from DRG grouping.
+            _DRG_INCLUDED_STATUSES = {"affirmed", "historical", "possible"}
             dx_codes = []
             for entity in results:
-                if entity.icd_codes and entity.is_affirmed:
+                if entity.icd_codes and entity.negation in _DRG_INCLUDED_STATUSES:
                     top_code = entity.icd_codes[0].get("code", "")
                     if top_code:
                         dx_codes.append(top_code)
@@ -360,9 +365,12 @@ class MedicalCodingPipeline:
 
         # MS-DRG cost estimation
         if self.drg_estimator is not None and results:
+            # Include affirmed, historical, and possible entities for DRG grouping.
+            # Historical conditions (PMH) affect CC/MCC severity tiers.
+            _DRG_INCLUDED_STATUSES = {"affirmed", "historical", "possible"}
             dx_codes = []
             for entity in results:
-                if entity.icd_codes and entity.is_affirmed:
+                if entity.icd_codes and entity.negation in _DRG_INCLUDED_STATUSES:
                     top_code = entity.icd_codes[0].get("code", "")
                     if top_code:
                         dx_codes.append(top_code)

@@ -113,7 +113,7 @@ class ICDCodeLookup:
         try:
             from datasets import load_dataset
             logger.info("Loading ICD-10-CM codes from '%s'...", hf_dataset)
-            ds = load_dataset(hf_dataset, split="train", cache_dir=cache_dir, trust_remote_code=True)
+            ds = load_dataset(hf_dataset, split="train", cache_dir=cache_dir)
             for row in ds:
                 code = row.get("code", row.get("Code", "")).strip()
                 desc = row.get("description", row.get("Description", "")).strip()
