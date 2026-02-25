@@ -19,9 +19,9 @@ Datasets combined
   sentences covering 80+ hand-crafted examples plus ~400 template-generated
   sentences targeting common NER failure patterns (abbreviations, multi-word
   boundaries, lab value confusion, negation contexts).
-- **MedMentions** (optional, bigbio/medmentions): 4,392 PubMed abstracts
-  with 350K+ UMLS entity mentions. Disease/Disorder semantic types
-  are filtered and converted to DIAGNOSIS.
+- **MedMentions** (optional, ibm/MedMentions-ZS): 29K pre-tokenized PubMed
+  abstracts with UMLS entity mentions in BIO format. Disease entities
+  (T038) are mapped to DIAGNOSIS.
 - **MACCROBAT** (optional, singh-aditya/MACCROBAT_biomedical_ner): 200
   clinical case reports with DISEASE_DISORDER entities. Provides clinical-
   note-style text that PubMed abstracts lack.
@@ -999,10 +999,13 @@ def _get_curated_icd_examples() -> DatasetDict:
 # Source 6: MedMentions — Disease/Disorder semantic types from UMLS
 # ---------------------------------------------------------------------------
 
-# UMLS Semantic Types for Disease/Disorder
+# UMLS Semantic Type T038 is used for disease entities in ibm/MedMentions-ZS
+# (zero-shot variant). Original MedMentions uses finer-grained types:
 _MEDMENTIONS_DISEASE_TYPES = frozenset({
     "T047", "T048", "T019", "T046", "T191", "T020", "T190", "T049",
 })
+# In the ZS variant, these are grouped under T038.
+_MEDMENTIONS_ZS_DISEASE_TAG = "T038"
 
 
 def _load_medmentions_diseases(
@@ -1010,130 +1013,101 @@ def _load_medmentions_diseases(
     max_examples: int = 5000,
 ) -> DatasetDict:
     """
-    Load Disease/Disorder entities from MedMentions (ST21pv subset).
+    Load Disease/Disorder entities from MedMentions.
 
-    MedMentions has 4,392 PubMed abstracts with 350K+ UMLS entity mentions
-    annotated at 97.3% inter-annotator agreement.  We filter for disease-related
-    semantic types and convert to DIAGNOSIS BIO tags.
+    Primary strategy: ``ibm/MedMentions-ZS`` — a parquet-based zero-shot
+    variant with 29K pre-tokenized PubMed abstracts in BIO format. Disease
+    entities are tagged as ``B-T038`` / ``I-T038`` (UMLS coarse type) and
+    mapped to DIAGNOSIS. Loads via standard ``load_dataset()`` with no
+    custom scripts.
 
-    Loading strategy:
-    The bigbio/medmentions HuggingFace dataset uses a loading script that is
-    no longer supported by the ``datasets`` library (>=4.x). We load the
-    pre-converted Parquet files directly from the ``refs/convert/parquet``
-    branch of the repository, which bypasses the deprecated loading script.
-    Falls back to reading cached Parquet files via ``pyarrow`` if the
-    ``datasets`` library approach also fails due to schema mismatches.
+    Fallback: ``bigbio/medmentions`` — downloads Parquet files from the
+    ``refs/convert/parquet`` branch and processes character-offset entity
+    annotations. Used only if the IBM dataset is unavailable.
     """
-    raw = _load_medmentions_parquet(cache_dir)
+    try:
+        return _load_medmentions_zs(cache_dir, max_examples)
+    except Exception as e:
+        logger.warning(
+            "  ibm/MedMentions-ZS failed (%s), trying bigbio/medmentions parquet fallback...", e,
+        )
+        return _load_medmentions_parquet_fallback(cache_dir, max_examples)
 
-    all_tokens: List[List[str]] = []
-    all_tags: List[List[int]] = []
-    all_labels: List[List[str]] = []
 
+def _load_medmentions_zs(
+    cache_dir: Optional[str] = None,
+    max_examples: int = 5000,
+) -> DatasetDict:
+    """
+    Load disease entities from ibm/MedMentions-ZS (zero-shot variant).
+
+    This dataset provides 29K pre-tokenized PubMed abstracts with BIO-format
+    UMLS semantic type tags. Disease entities use the T038 coarse type.
+    No custom loading scripts needed — standard parquet format.
+    """
+    raw = load_dataset("ibm/MedMentions-ZS", cache_dir=cache_dir)
+
+    disease_b = f"B-{_MEDMENTIONS_ZS_DISEASE_TAG}"
+    disease_i = f"I-{_MEDMENTIONS_ZS_DISEASE_TAG}"
+
+    def _map_to_diagnosis(example):
+        labels = []
+        for tag in example["ner_tags"]:
+            if tag == disease_b:
+                labels.append("B-DIAGNOSIS")
+            elif tag == disease_i:
+                labels.append("I-DIAGNOSIS")
+            else:
+                labels.append("O")
+        return {
+            "tokens": example["tokens"],
+            "ner_tags": [ICD_NER_LABEL2ID[lab] for lab in labels],
+            "ner_labels": labels,
+        }
+
+    result = {}
+    total_examples = 0
+    total_entities = 0
     for split_name in ["train", "validation", "test"]:
         if split_name not in raw:
             continue
-        count = 0
-        for example in raw[split_name]:
-            if count >= max_examples:
-                break
+        split_ds = raw[split_name]
+        # Cap per-split examples
+        if len(split_ds) > max_examples:
+            split_ds = split_ds.select(range(max_examples))
+        # Filter to keep only examples with at least one disease entity
+        split_ds = split_ds.filter(
+            lambda ex: any(t == disease_b for t in ex["ner_tags"]),
+        )
+        # Map tags to DIAGNOSIS
+        cols_to_remove = [c for c in split_ds.column_names if c not in {"tokens", "ner_tags", "ner_labels"}]
+        split_ds = split_ds.map(_map_to_diagnosis, remove_columns=cols_to_remove)
+        result[split_name] = split_ds
+        total_examples += len(split_ds)
+        total_entities += sum(
+            1 for ex in split_ds for lab in ex["ner_labels"] if lab.startswith("B-")
+        )
 
-            passages = example.get("passages", [])
-            entities = example.get("entities", [])
-            if not passages or not entities:
-                continue
+    if not result:
+        raise RuntimeError("No disease entities found in ibm/MedMentions-ZS")
 
-            # Reconstruct full text
-            text_parts = []
-            for p in passages:
-                t = p.get("text", "")
-                if isinstance(t, list):
-                    t = t[0] if t else ""
-                text_parts.append(t)
-            text = " ".join(text_parts)
-            if not text.strip():
-                continue
-
-            # Filter for disease-related entities
-            disease_entities = []
-            for ent in entities:
-                is_disease = False
-                # Source-format parquet uses semantic_type_id directly
-                sem_types = ent.get("semantic_type_id", [])
-                if isinstance(sem_types, list):
-                    if any(st in _MEDMENTIONS_DISEASE_TYPES for st in sem_types):
-                        is_disease = True
-                elif sem_types in _MEDMENTIONS_DISEASE_TYPES:
-                    is_disease = True
-
-                # BigBio KB format uses type + normalized
-                if not is_disease:
-                    ent_type = ent.get("type", "")
-                    if ent_type in _MEDMENTIONS_DISEASE_TYPES:
-                        is_disease = True
-                    else:
-                        for norm in ent.get("normalized", []):
-                            if norm.get("db_name", "") in _MEDMENTIONS_DISEASE_TYPES:
-                                is_disease = True
-                                break
-
-                if is_disease:
-                    for offset_pair in ent.get("offsets", []):
-                        disease_entities.append({
-                            "class": "DISORDER",
-                            "start": offset_pair[0],
-                            "end": offset_pair[1],
-                        })
-
-            if not disease_entities:
-                continue
-
-            tokens, labels = _spans_to_diagnosis_bio(
-                text, disease_entities, frozenset({"DISORDER"}),
-            )
-            if any(l.startswith("B-") for l in labels):
-                all_tokens.append(tokens)
-                all_labels.append(labels)
-                all_tags.append([ICD_NER_LABEL2ID[lab] for lab in labels])
-                count += 1
-
-    if not all_tokens:
-        raise RuntimeError("No disease entities found in MedMentions")
-
-    n = len(all_tokens)
-    n_train = int(n * 0.8)
-    n_val = int(n * 0.1)
-
-    def _make_ds(start, end):
-        return Dataset.from_dict({
-            "tokens": all_tokens[start:end],
-            "ner_tags": all_tags[start:end],
-            "ner_labels": all_labels[start:end],
-        })
-
-    result = DatasetDict({
-        "train": _make_ds(0, n_train),
-        "validation": _make_ds(n_train, n_train + n_val),
-        "test": _make_ds(n_train + n_val, n),
-    })
-
-    n_entities = sum(lab.startswith("B-") for row in all_labels for lab in row)
-    logger.info("  MedMentions: %d examples, %d DIAGNOSIS entities", n, n_entities)
-    return result
+    dataset = DatasetDict(result)
+    logger.info(
+        "  MedMentions-ZS: %d examples, %d DIAGNOSIS entities", total_examples, total_entities,
+    )
+    return dataset
 
 
-def _load_medmentions_parquet(
+def _load_medmentions_parquet_fallback(
     cache_dir: Optional[str] = None,
-) -> Dict[str, list]:
+    max_examples: int = 5000,
+) -> DatasetDict:
     """
-    Load MedMentions ST21pv source parquet files directly.
+    Fallback: load MedMentions from bigbio/medmentions parquet files.
 
-    The bigbio/medmentions dataset uses a deprecated loading script.
-    This function downloads the pre-converted Parquet files from the
-    ``refs/convert/parquet`` branch and reads them with ``pyarrow``,
-    bypassing the broken ``load_dataset()`` path entirely.
-
-    Returns a dict mapping split names to lists of example dicts.
+    Downloads pre-converted Parquet files from the ``refs/convert/parquet``
+    branch and converts character-offset entity annotations to BIO tags.
+    Used when ibm/MedMentions-ZS is unavailable.
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -1145,7 +1119,7 @@ def _load_medmentions_parquet(
 
     import pyarrow.parquet as pq
 
-    splits: Dict[str, list] = {}
+    raw: Dict[str, list] = {}
     for split_name in ["train", "validation", "test"]:
         filename = f"medmentions_st21pv_source/{split_name}/0000.parquet"
         try:
@@ -1158,28 +1132,77 @@ def _load_medmentions_parquet(
             )
             table = pq.read_table(path)
             rows = table.to_pydict()
-            # Convert columnar dict to list of row dicts
             n_rows = len(rows[list(rows.keys())[0]])
-            split_data = []
-            for i in range(n_rows):
-                split_data.append({k: rows[k][i] for k in rows})
-            splits[split_name] = split_data
-            logger.info(
-                "  MedMentions %s: loaded %d documents from parquet",
-                split_name, len(split_data),
-            )
+            raw[split_name] = [{k: rows[k][i] for k in rows} for i in range(n_rows)]
+            logger.info("  MedMentions %s: loaded %d documents from parquet", split_name, len(raw[split_name]))
         except Exception as e:
-            logger.warning(
-                "  Could not load MedMentions %s parquet: %s", split_name, e,
-            )
+            logger.warning("  Could not load MedMentions %s parquet: %s", split_name, e)
 
-    if not splits:
-        raise RuntimeError(
-            "Could not load any MedMentions splits from parquet. "
-            "The bigbio/medmentions dataset requires parquet files from "
-            "the refs/convert/parquet branch."
-        )
-    return splits
+    if not raw:
+        raise RuntimeError("Could not load any MedMentions splits from parquet")
+
+    all_tokens: List[List[str]] = []
+    all_tags: List[List[int]] = []
+    all_labels: List[List[str]] = []
+
+    for split_name in ["train", "validation", "test"]:
+        if split_name not in raw:
+            continue
+        count = 0
+        for example in raw[split_name]:
+            if count >= max_examples:
+                break
+            passages = example.get("passages", [])
+            entities = example.get("entities", [])
+            if not passages or not entities:
+                continue
+            text_parts = []
+            for p in passages:
+                t = p.get("text", "")
+                if isinstance(t, list):
+                    t = t[0] if t else ""
+                text_parts.append(t)
+            text = " ".join(text_parts)
+            if not text.strip():
+                continue
+            disease_entities = []
+            for ent in entities:
+                sem_types = ent.get("semantic_type_id", [])
+                is_disease = (
+                    any(st in _MEDMENTIONS_DISEASE_TYPES for st in sem_types)
+                    if isinstance(sem_types, list)
+                    else sem_types in _MEDMENTIONS_DISEASE_TYPES
+                )
+                if is_disease:
+                    for offset_pair in ent.get("offsets", []):
+                        disease_entities.append({"class": "DISORDER", "start": offset_pair[0], "end": offset_pair[1]})
+            if not disease_entities:
+                continue
+            tokens, labels = _spans_to_diagnosis_bio(text, disease_entities, frozenset({"DISORDER"}))
+            if any(l.startswith("B-") for l in labels):
+                all_tokens.append(tokens)
+                all_labels.append(labels)
+                all_tags.append([ICD_NER_LABEL2ID[lab] for lab in labels])
+                count += 1
+
+    if not all_tokens:
+        raise RuntimeError("No disease entities found in MedMentions parquet fallback")
+
+    n = len(all_tokens)
+    n_train = int(n * 0.8)
+    n_val = int(n * 0.1)
+
+    def _make_ds(start, end):
+        return Dataset.from_dict({"tokens": all_tokens[start:end], "ner_tags": all_tags[start:end], "ner_labels": all_labels[start:end]})
+
+    result = DatasetDict({
+        "train": _make_ds(0, n_train),
+        "validation": _make_ds(n_train, n_train + n_val),
+        "test": _make_ds(n_train + n_val, n),
+    })
+    n_entities = sum(lab.startswith("B-") for row in all_labels for lab in row)
+    logger.info("  MedMentions (parquet fallback): %d examples, %d DIAGNOSIS entities", n, n_entities)
+    return result
 
 
 # ---------------------------------------------------------------------------

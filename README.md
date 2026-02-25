@@ -30,7 +30,7 @@ The `icd_ner` dataset is an 8-source composite corpus with a unified `DIAGNOSIS`
 3. **BioMed NER DISORDER/PHENOTYPE** — clinical case reports from `knowledgator/biomed_NER`
 4. **ADE Corpus V2** — adverse drug effect spans from `ade_corpus_v2`
 5. **Curated ICD examples** — 80+ hand-crafted + ~80 template-generated clinical sentences targeting common NER failure patterns (abbreviations, multi-word boundaries, lab value confusion, negation contexts, rare diseases, high-frequency ICD codes)
-6. **MedMentions** (optional) — up to 5K examples from 4,392 PubMed abstracts with 350K+ UMLS entity mentions, filtered for disease/disorder semantic types (loaded via direct Parquet download, bypassing deprecated HuggingFace loading script)
+6. **MedMentions** (optional) — up to 5K examples from `ibm/MedMentions-ZS` (29K pre-tokenized PubMed abstracts with UMLS BIO tags, disease entities T038 mapped to DIAGNOSIS; falls back to `bigbio/medmentions` parquet if unavailable)
 7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack (loaded via direct JSON download, bypassing deprecated HuggingFace loading script)
 8. **Curated discharge summary examples** — 30+ hand-crafted sentences targeting DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, and the formatting patterns found in real discharge summaries
 
@@ -301,7 +301,7 @@ expanded, offsets = expander.expand_with_offsets("dx: htn, dm2")
 | 3 | BioMed NER DISORDER/PHENOTYPE | Clinical case reports with disorder and phenotype spans |
 | 4 | ADE Corpus V2 | Adverse drug effect spans (drug reactions as diagnoses) |
 | 5 | Curated ICD examples (80+ hand-crafted + ~80 template-generated) | Targets common NER failure patterns: abbreviations, multi-word boundaries, lab confusion, negation contexts, rare diseases, high-frequency ICD codes |
-| 6 | MedMentions (optional, up to 5K) | 4,392 PubMed abstracts, disease/disorder UMLS semantic types (T047, T048, T019, T046, T191) |
+| 6 | MedMentions (optional, up to 5K) | ibm/MedMentions-ZS: 29K pre-tokenized PubMed abstracts, disease UMLS type T038 mapped to DIAGNOSIS |
 | 7 | MACCROBAT (optional, up to 3K) | 200 clinical case reports with DISEASE_DISORDER entities — closes the PubMed-to-clinical domain gap |
 | 8 | Curated discharge summary examples (30+ sentences) | DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, discharge formatting patterns |
 
@@ -885,7 +885,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | ICD NER training | BC5CDR (tner/bc5cdr) | CC BY 4.0 | 1.5K abstracts |
 | ICD NER training | BioMed NER (knowledgator/biomed_NER) | Apache 2.0 | 500 case reports |
 | ICD NER training | ADE Corpus V2 (ade_corpus_v2) | Public domain | Drug-effect spans |
-| ICD NER training | MedMentions (bigbio/medmentions) | CC0 1.0 | 4,392 abstracts |
+| ICD NER training | MedMentions (ibm/MedMentions-ZS) | CC0 1.0 | 29K abstracts |
 | ICD NER training | MACCROBAT (singh-aditya/MACCROBAT_biomedical_ner) | CC BY 4.0 | 200 case reports |
 | ICD NER training | Curated + template-generated examples | Project-internal | ~160 sentences |
 | ICD NER training | Curated discharge summary examples | Project-internal | ~30 sentences |

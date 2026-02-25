@@ -152,7 +152,7 @@ The `icd_ner` dataset merges eight sources with unified DIAGNOSIS labels:
 3. **BioMed NER DISORDER/PHENOTYPE** — clinical case reports from knowledgator/biomed_NER
 4. **ADE Corpus V2** — adverse drug effect spans from ade_corpus_v2
 5. **Curated ICD examples** — 80+ hand-crafted + ~100 template-generated sentences targeting common NER failure patterns (abbreviations, multi-word boundaries, lab value confusion, negation contexts, rare diseases, high-frequency ICD codes)
-6. **MedMentions** (optional) — up to 5K examples from 4,392 PubMed abstracts with 350K+ UMLS entity mentions, filtered for disease/disorder semantic types (T047, T048, T019, T046, T191). Loaded via direct Parquet download (bypasses deprecated HuggingFace loading script).
+6. **MedMentions** (optional) — up to 5K examples from ibm/MedMentions-ZS (29K pre-tokenized PubMed abstracts with UMLS BIO tags). Disease entities (T038) mapped to DIAGNOSIS. Falls back to bigbio/medmentions parquet if unavailable.
 7. **MACCROBAT** (optional) — up to 3K examples from 200 clinical case reports with DISEASE_DISORDER entities, providing clinical-note-style text that PubMed abstracts lack. Loaded via direct JSON download (bypasses deprecated HuggingFace loading script).
 8. **Curated discharge summary examples** — 30+ hand-crafted sentences targeting DRG-relevant diagnoses: CC/MCC comorbidities, hospital-acquired conditions, procedure-related diagnoses, and discharge summary formatting patterns
 
@@ -409,7 +409,7 @@ When making changes to the repository, update `README.md` to reflect those chang
 ## Common Pitfalls
 
 - The `icd_ner` dataset is built at runtime by merging up to 8 sources (5 HuggingFace datasets + 3 built-in). First load downloads ~500MB+. Subsequent loads use cache. Sources 6 (MedMentions) and 7 (MACCROBAT) are optional and skipped gracefully if unavailable. Source 8 (discharge summary examples) is built-in and always available.
-- MedMentions and MACCROBAT use deprecated HuggingFace loading scripts. The loader bypasses these by downloading Parquet/JSON files directly from the repository.
+- MedMentions uses ibm/MedMentions-ZS (parquet, standard `load_dataset()`) as the primary source, with bigbio/medmentions parquet files as a fallback. MACCROBAT loads via direct JSON download from the repository (bypasses deprecated loading script).
 - GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Use `scripts/train_gatortron_qlora.py` for QLoRA fine-tuning (75% less memory), or reduce batch size / use gradient accumulation for full fine-tuning. GatorTron-medium (~1B) and GatorTron-large (~3.9B) should always use QLoRA.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.

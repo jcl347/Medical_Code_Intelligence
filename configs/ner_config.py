@@ -107,7 +107,7 @@ DATASET_CONFIGS = {
             "  3. BioMed NER DISORDER entities (clinical case reports)\n"
             "  4. ADE Corpus V2 adverse drug effects\n"
             "  5. Curated ICD clinical examples (80+ hand-crafted sentences)\n"
-            "  6. MedMentions (optional, up to 5K PubMed abstracts, disease semantic types)\n"
+            "  6. MedMentions (optional, ibm/MedMentions-ZS, 29K PubMed abstracts)\n"
             "  7. MACCROBAT (optional, up to 3K clinical case reports, DISEASE_DISORDER)\n"
             "  8. Curated discharge summary examples (DRG-relevant diagnoses)\n"
             "Sources 6-7 download from HuggingFace on first use and are "
