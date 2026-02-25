@@ -292,19 +292,37 @@ Based on: Hu et al. (2022) — LoRA, Dettmers et al. (2023) — QLoRA.
 
 ## Multi-Model Training Comparison
 
-The notebook (`notebooks/demo_all_components.ipynb`, Section 17) trains all five BERT-family models on the full ICD NER dataset and compares entity-level F1:
+The notebook (`notebooks/demo_all_components.ipynb`, Section 17) trains all four 110M-parameter BERT-family models on the full ICD NER composite dataset and compares entity-level F1:
 
-| Model | Params | Batch Size | Notes |
-|-------|--------|------------|-------|
-| PubMedBERT | 110M | 16 | BLURB SOTA, strong all-around |
-| BioBERT | 110M | 16 | PubMed literature baseline |
-| Bio_ClinicalBERT | 110M | 16 | Best for clinical note text |
-| SciBERT | 110M | 16 | Scientific domain coverage |
-| GatorTron-base | 345M | 8 (grad_accum=2) | Largest fully-trainable model |
+| Model | Params | Batch Size | Eff. Batch | Notes |
+|-------|--------|------------|------------|-------|
+| PubMedBERT | 110M | 16 | 32 | BLURB SOTA, strong all-around |
+| BioBERT | 110M | 16 | 32 | PubMed literature baseline |
+| Bio_ClinicalBERT | 110M | 16 | 32 | Best for clinical note text |
+| SciBERT | 110M | 16 | 32 | Scientific domain coverage |
 
-All models train for 20 epochs with early stopping (patience=5), FP16 when CUDA is available, and the same hyperparameters (LR=5e-5, warmup=10%, max_seq_length=512). GatorTron uses smaller batch size with gradient accumulation to fit in memory. GPU memory is freed between models via `gc.collect()` + `torch.cuda.empty_cache()`.
+### Production Training Protocol
 
-The best model by F1 is automatically used in the Section 18 pipeline demo (shorthand -> NER -> negation -> ICD -> DRG).
+The notebook uses production-grade hyperparameters tuned for the 8-source composite dataset:
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| Data split | Train+Val merged → 90/10 internal split; Test held out | Maximum training data with clean early-stopping signal |
+| Learning rate | 2e-5 | Lower LR improves generalization on noisy composite data |
+| LR scheduler | Cosine annealing | Smoother decay than linear; avoids premature LR collapse |
+| Effective batch size | 32 (16 × 2 grad accum) | Larger batch stabilizes gradients across heterogeneous sources |
+| Label smoothing | 0.05 | Regularizes against annotation inconsistencies across sources |
+| Eval frequency | Every 100 steps | Catches transient F1 improvements |
+| Early stopping | Patience 10 | Prevents premature stopping on noisy composite F1 |
+| Max epochs | 30 | More room to converge; early stopping selects the peak |
+| Warmup | 10% | Standard warmup ratio |
+| Weight decay | 0.01 | L2 regularization |
+
+Key differences from CLI defaults (which use LR=5e-5, linear scheduler, patience=5): the notebook protocol is optimized for the composite dataset's heterogeneous annotation quality, where default settings cause premature early stopping (~4 epochs) and suboptimal convergence.
+
+GPU memory is freed between models via `gc.collect()` + `torch.cuda.empty_cache()`. For GatorTron (345M+), use the dedicated QLoRA script.
+
+The best model by test F1 is automatically used in the Section 18 pipeline demo (shorthand -> NER -> negation -> ICD -> DRG).
 
 ## Architecture Decisions
 
@@ -376,7 +394,7 @@ Key test files:
 
 ## Notebooks
 
-The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all five BERT-family models on the ICD NER dataset.
+The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all four 110M-parameter BERT-family models on the ICD NER dataset with production-grade hyperparameters.
 
 ### Keeping the Notebook Up to Date
 
@@ -418,4 +436,4 @@ When making changes to the repository, update `README.md` to reflect those chang
 - The `train_gatortron_qlora.py` script accepts both config keys (e.g., `gatortron-base`) and full HuggingFace IDs (e.g., `UFNLP/gatortron-base`). Keys are resolved via `MODEL_CONFIGS`.
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.
-- The notebook's Section 17 trains all models on the full ICD dataset for 20 epochs. On CPU this will be slow; GPU recommended for the training cells.
+- The notebook's Section 17 trains all models on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). On CPU this will be slow; GPU recommended for the training cells.

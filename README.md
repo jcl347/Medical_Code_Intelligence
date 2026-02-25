@@ -341,6 +341,8 @@ For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are re
 
 `notebooks/demo_all_components.ipynb` demonstrates every pipeline component interactively — shorthand expansion, negation detection, ICD-10-CM linking, DRG cost estimation, entity post-processing, evaluation metrics, adversarial training, and the full end-to-end pipeline. All cells run on CPU using built-in fallback data (no GPU or network required).
 
+**Section 17 — Multi-Model Training Comparison**: Trains all four 110M BERT models (PubMedBERT, BioBERT, Bio_ClinicalBERT, SciBERT) on the full ICD NER composite dataset with production-grade hyperparameters: LR=2e-5, cosine scheduler, effective batch size 32, label smoothing 0.05, patience 10. Train+val data is merged for maximum training signal, with 10% held out for early stopping and the test set reserved for final comparison. See the [CLAUDE.md](CLAUDE.md) Multi-Model Training Comparison section for details.
+
 ```bash
 cd notebooks && jupyter notebook demo_all_components.ipynb
 ```
@@ -458,9 +460,11 @@ python scripts/train.py [OPTIONS]
 # Minimal: train PubMedBERT on ICD NER with all defaults
 python scripts/train.py --model pubmedbert --dataset icd_ner
 
-# Clinical model with tuned hyperparameters
+# Production-grade training for ICD NER composite dataset
+# (matches notebook Section 17 protocol)
 python scripts/train.py --model bio_clinicalbert --dataset icd_ner \
-    --lr 3e-5 --epochs 15 --patience 3 --scheduler cosine
+    --lr 2e-5 --epochs 30 --patience 10 --scheduler cosine \
+    --grad-accum 2 --label-smoothing 0.05 --eval-steps 100
 
 # GatorTron with reduced batch size (345M params needs more memory)
 python scripts/train.py --model gatortron-base --dataset icd_ner \
