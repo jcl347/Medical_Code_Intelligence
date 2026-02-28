@@ -70,8 +70,10 @@ class MedicalCodingPipeline:
     End-to-end pipeline for medical coding NER.
 
     Supports two negation strategies:
-    - "rules" (default): ConText/NegEx rule-based detector (fast, no GPU)
-    - "transformer": bvanaken/clinical-assertion-negation-bert (learned, GPU-optional)
+    - "transformer" (default): bvanaken/clinical-assertion-negation-bert (learned,
+      GPU-optional), supplemented by rule-based detection for HISTORICAL/FAMILY
+      contexts that the transformer doesn't cover
+    - "rules": ConText/NegEx rule-based detector only (fast, no GPU, no download)
 
     Usage
     -----
@@ -93,7 +95,7 @@ class MedicalCodingPipeline:
     detect_negation : bool
         Whether to run negation/context detection on extracted entities.
     negation_strategy : str
-        "rules" for ConText/NegEx, "transformer" for learned assertion model.
+        "transformer" for learned assertion model (default), "rules" for ConText/NegEx.
     resolve_icd_codes : bool
         Whether to resolve entities to ICD-10-CM codes via TF-IDF matching.
     icd_top_k : int
@@ -116,7 +118,7 @@ class MedicalCodingPipeline:
         model_path: Optional[str] = None,
         expand_shorthand: bool = True,
         detect_negation: bool = True,
-        negation_strategy: str = "rules",
+        negation_strategy: str = "transformer",
         resolve_icd_codes: bool = False,
         icd_top_k: int = 3,
         resolve_drg: bool = False,
@@ -140,8 +142,12 @@ class MedicalCodingPipeline:
         if detect_negation:
             if negation_strategy == "transformer":
                 from src.clinical.assertion import AssertionClassifier
-                self.negation_detector = None
                 self.assertion_classifier = AssertionClassifier(device=device)
+                # Rule-based supplement for HISTORICAL/FAMILY contexts
+                # (the transformer only detects PRESENT/ABSENT/POSSIBLE)
+                self.negation_detector = NegationDetector(
+                    scope_window=negation_scope_window,
+                )
             else:
                 self.negation_detector = NegationDetector(
                     scope_window=negation_scope_window,
@@ -183,6 +189,44 @@ class MedicalCodingPipeline:
                 self._model_path, device=self._device,
             )
         return self._predictor
+
+    def _apply_assertion_detection(
+        self,
+        text: str,
+        entities: List[Dict],
+    ) -> List[Dict]:
+        """
+        Apply negation/assertion detection to entity dicts.
+
+        When using transformer strategy, runs the BERT assertion model
+        then supplements with rule-based detection for HISTORICAL and FAMILY
+        contexts that the transformer cannot detect.
+        """
+        if not entities:
+            return entities
+
+        if self.assertion_classifier is not None:
+            transformer_entities = self.assertion_classifier.annotate_entities(
+                text, entities,
+            )
+            # Supplement with rule-based HISTORICAL/FAMILY detection
+            if self.negation_detector is not None:
+                rule_entities = self.negation_detector.annotate_entities(
+                    text, entities,
+                )
+                for i in range(len(transformer_entities)):
+                    rule_neg = rule_entities[i].get("negation", "affirmed")
+                    t_neg = transformer_entities[i].get("negation", "affirmed")
+                    if rule_neg in ("historical", "family") and t_neg == "affirmed":
+                        transformer_entities[i]["negation"] = rule_neg
+                        if "negation_trigger" in rule_entities[i]:
+                            transformer_entities[i]["negation_trigger"] = (
+                                rule_entities[i]["negation_trigger"]
+                            )
+            return transformer_entities
+        elif self.negation_detector is not None:
+            return self.negation_detector.annotate_entities(text, entities)
+        return entities
 
     def __call__(self, text: str) -> List[MedicalEntity]:
         """Run the full pipeline on a clinical text string."""
@@ -232,11 +276,8 @@ class MedicalCodingPipeline:
             for e in raw_entities
         ]
 
-        # Step 3: Negation detection
-        if self.negation_detector is not None and entity_dicts:
-            entity_dicts = self.negation_detector.annotate_entities(
-                expanded_text, entity_dicts,
-            )
+        # Step 3: Negation / assertion detection
+        entity_dicts = self._apply_assertion_detection(expanded_text, entity_dicts)
 
         # Step 4: Build MedicalEntity objects with offset mapping
         results = []
@@ -325,16 +366,8 @@ class MedicalCodingPipeline:
         if self.shorthand_expander is not None:
             expanded_text, offset_map = self.shorthand_expander.expand_with_offsets(text)
 
-        # Apply negation detection (rule-based or transformer)
-        if entities:
-            if self.assertion_classifier is not None:
-                entities = self.assertion_classifier.annotate_entities(
-                    expanded_text, entities,
-                )
-            elif self.negation_detector is not None:
-                entities = self.negation_detector.annotate_entities(
-                    expanded_text, entities,
-                )
+        # Apply negation / assertion detection
+        entities = self._apply_assertion_detection(expanded_text, entities)
 
         results = []
         for ent in entities:

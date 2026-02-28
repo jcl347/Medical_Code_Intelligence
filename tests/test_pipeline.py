@@ -21,6 +21,7 @@ class TestPipelineWithoutModel:
             model_path=None,
             expand_shorthand=True,
             detect_negation=True,
+            negation_strategy="rules",
         )
 
     def test_process_with_entities_negation(self, pipeline):
@@ -156,6 +157,7 @@ class TestPipelineDisableFeatures:
     def test_no_shorthand(self):
         pipeline = MedicalCodingPipeline(
             model_path=None, expand_shorthand=False, detect_negation=True,
+            negation_strategy="rules",
         )
         assert pipeline.shorthand_expander is None
 
@@ -184,6 +186,7 @@ class TestEndToEndClinicalScenarios:
     def pipeline(self):
         return MedicalCodingPipeline(
             model_path=None, expand_shorthand=True, detect_negation=True,
+            negation_strategy="rules",
         )
 
     def test_mixed_negated_and_affirmed(self, pipeline):
