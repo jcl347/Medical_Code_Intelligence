@@ -229,6 +229,10 @@ def load_icd_ner_dataset(
     # --- Cast to common schema and merge ---
     for name, ds in cleaned_sources:
         for split in list(ds.keys()):
+            # Skip splits missing required columns (e.g. empty after filtering)
+            if "ner_labels" not in ds[split].column_names:
+                del ds[split]
+                continue
             ds[split] = ds[split].cast(_UNIFIED_FEATURES)
 
     merged = {}
@@ -1079,6 +1083,9 @@ def _load_medmentions_zs(
         split_ds = split_ds.filter(
             lambda ex: any(t == disease_b for t in ex["ner_tags"]),
         )
+        # Skip empty splits (e.g. validation/test may have no disease entities)
+        if len(split_ds) == 0:
+            continue
         # Map tags to DIAGNOSIS
         cols_to_remove = [c for c in split_ds.column_names if c not in {"tokens", "ner_tags", "ner_labels"}]
         split_ds = split_ds.map(_map_to_diagnosis, remove_columns=cols_to_remove)
@@ -1270,7 +1277,7 @@ def _load_maccrobat_diseases(
         # Map original labels to DIAGNOSIS
         mapped_labels = []
         for label in ner_labels_raw:
-            label_upper = label.upper().replace("-", "_")
+            label_upper = str(label).upper().replace("-", "_")
 
             prefix = ""
             entity_type = label_upper
