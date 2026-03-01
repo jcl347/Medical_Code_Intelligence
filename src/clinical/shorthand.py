@@ -13,8 +13,7 @@ Loads abbreviations from three public sources (tried in order):
 For ambiguous abbreviations (23% of Meta-Inventory have multiple senses),
 two disambiguation strategies are supported:
 - "preferred": Use the Preferred Long Form (PLF) from Meta-Inventory (fast)
-- "transformer": Use MeDAL ELECTRA model for contextual disambiguation
-- "context_rules": Use hand-crafted regex rules (legacy, fast)
+- "context_rules": Use hand-crafted regex rules for common ambiguities
 
 Character offsets are preserved through expansion for NER alignment.
 """
@@ -26,6 +25,7 @@ import logging
 import os
 import re
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,6 +57,9 @@ def _download_meta_inventory(cache_dir: str) -> Optional[str]:
     """
     Download the Meta-Inventory CSV from Zenodo and cache locally.
 
+    The Zenodo record may contain either a direct CSV file or a ZIP archive
+    containing the CSV. Both formats are handled automatically.
+
     Returns the path to the cached CSV, or None if download fails.
     """
     os.makedirs(cache_dir, exist_ok=True)
@@ -72,22 +75,46 @@ def _download_meta_inventory(cache_dir: str) -> Optional[str]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             record = json.loads(resp.read().decode("utf-8"))
 
-        # Find the CSV file in the record
+        # Find a CSV or ZIP file in the record
         csv_url = None
+        zip_url = None
         for f in record.get("files", []):
             key = f.get("key", "")
             if key.endswith(".csv"):
                 csv_url = f.get("links", {}).get("self")
                 break
+            elif key.endswith(".zip"):
+                zip_url = f.get("links", {}).get("self")
 
-        if csv_url is None:
-            logger.warning("No CSV file found in Zenodo record %s.", ZENODO_RECORD_ID)
-            return None
+        if csv_url is not None:
+            logger.info("Downloading Meta-Inventory CSV from %s ...", csv_url)
+            urllib.request.urlretrieve(csv_url, cached_path)
+            logger.info("Cached Meta-Inventory to %s", cached_path)
+            return cached_path
 
-        logger.info("Downloading Meta-Inventory from %s ...", csv_url)
-        urllib.request.urlretrieve(csv_url, cached_path)
-        logger.info("Cached Meta-Inventory to %s", cached_path)
-        return cached_path
+        if zip_url is not None:
+            logger.info("Downloading Meta-Inventory ZIP from %s ...", zip_url)
+            zip_path = os.path.join(cache_dir, "meta_inventory.zip")
+            urllib.request.urlretrieve(zip_url, zip_path)
+
+            # Extract the first CSV file from the ZIP
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+                if not csv_names:
+                    logger.warning("No CSV file found inside ZIP archive.")
+                    os.remove(zip_path)
+                    return None
+                csv_name = csv_names[0]
+                logger.info("Extracting %s from ZIP archive...", csv_name)
+                with zf.open(csv_name) as src, open(cached_path, "wb") as dst:
+                    dst.write(src.read())
+
+            os.remove(zip_path)
+            logger.info("Cached Meta-Inventory to %s", cached_path)
+            return cached_path
+
+        logger.warning("No CSV or ZIP file found in Zenodo record %s.", ZENODO_RECORD_ID)
+        return None
 
     except Exception as e:
         logger.warning("Failed to download Meta-Inventory: %s", e)
@@ -238,10 +265,9 @@ class ShorthandExpander:
     the Meta-Inventory, since the built-in set is specifically curated for
     clinical note shorthand.
 
-    For ambiguous abbreviations, supports three disambiguation strategies:
+    For ambiguous abbreviations, supports two disambiguation strategies:
     - "preferred": Use Preferred Long Form from Meta-Inventory (default, fast)
-    - "transformer": Use MeDAL ELECTRA model for contextual disambiguation
-    - "context_rules": Use hand-crafted regex patterns (legacy)
+    - "context_rules": Use hand-crafted regex patterns for common ambiguities
 
     Parameters
     ----------
@@ -251,8 +277,7 @@ class ShorthandExpander:
     cache_dir : str, optional
         Cache directory for downloaded data.
     disambiguation : str
-        Strategy for ambiguous abbreviations: "preferred", "transformer",
-        or "context_rules".
+        Strategy for ambiguous abbreviations: "preferred" or "context_rules".
     custom_abbreviations : dict, optional
         Additional abbreviation -> expansion mappings (highest priority).
     min_abbreviation_length : int
@@ -275,7 +300,6 @@ class ShorthandExpander:
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._min_length = min_abbreviation_length
         self._sense_inventory: Dict[str, List[str]] = {}
-        self._disambiguator = None
         self._medialpy_available = False
 
         # Load abbreviations from the specified source
@@ -370,19 +394,6 @@ class ShorthandExpander:
                     if re.search(pattern, context_before, re.IGNORECASE):
                         return expansion
 
-        # Strategy: transformer (lazy-loaded MeDAL model)
-        if self._disambiguation == "transformer":
-            senses = self._sense_inventory.get(abbr_lower, [])
-            if len(senses) > 1 and self._disambiguator is not None:
-                try:
-                    result = self._disambiguator.disambiguate_from_context(
-                        context_before, abbr, senses,
-                    )
-                    if result:
-                        return result
-                except Exception:
-                    pass  # Fall through to dictionary lookup
-
         # Strategy: preferred (default) — just use the dictionary
         expansion = self.abbreviations.get(abbr_lower)
         if expansion:
@@ -395,14 +406,6 @@ class ShorthandExpander:
                 return medialpy_result
 
         return abbr
-
-    @property
-    def disambiguator(self):
-        """Lazy-load the MeDAL disambiguation model."""
-        if self._disambiguator is None and self._disambiguation == "transformer":
-            from src.clinical.abbreviation_disambiguator import AbbreviationDisambiguator
-            self._disambiguator = AbbreviationDisambiguator()
-        return self._disambiguator
 
     def expand(self, text: str) -> str:
         """
@@ -420,13 +423,6 @@ class ShorthandExpander:
         """
         if not self.expand_in_place:
             return text
-
-        # Ensure disambiguator is loaded if needed
-        if self._disambiguation == "transformer" and self._disambiguator is None:
-            try:
-                self._disambiguator = self.disambiguator
-            except Exception:
-                pass
 
         def _replace(match):
             abbr = match.group(0)
@@ -448,13 +444,6 @@ class ShorthandExpander:
             Each dict: {original_start, original_end, expanded_start, expanded_end,
                         abbreviation, expansion}
         """
-        # Ensure disambiguator is loaded if needed
-        if self._disambiguation == "transformer" and self._disambiguator is None:
-            try:
-                self._disambiguator = self.disambiguator
-            except Exception:
-                pass
-
         offset_map = []
         result_parts = []
         last_end = 0

@@ -134,7 +134,7 @@ pipeline = MedicalCodingPipeline(
     model_path="outputs/pubmedbert_icd_ner/best_model",
     expand_shorthand=True,
     detect_negation=True,
-    negation_strategy="rules",      # or "transformer" for learned assertion
+    negation_strategy="transformer",  # default; or "rules" for fast rule-based only
     resolve_icd_codes=True,         # enable ICD-10-CM resolution
     icd_top_k=3,                    # top-3 candidate codes per entity
     resolve_drg=True,               # enable MS-DRG cost estimation
@@ -233,24 +233,13 @@ print(f"DRG 291 estimated payment: ${cost:,.2f}")
 
 ### Negation Detection
 
-Two strategies are available:
+Two strategies are available. The default is **transformer** (hybrid):
 
-**Rule-based (ConText/NegEx) — fast, no GPU needed:**
+**Transformer-based (default) — bvanaken/clinical-assertion-negation-bert:**
 
-```python
-from src.clinical.negation import NegationDetector
-
-detector = NegationDetector()
-entities = [
-    {"text": "fever", "label": "DIAGNOSIS", "start": 15, "end": 20},
-    {"text": "cough", "label": "DIAGNOSIS", "start": 29, "end": 34},
-]
-annotated = detector.annotate_entities("Patient denies fever but has cough", entities)
-# annotated[0]["negation"] == "negated"   (fever)
-# annotated[1]["negation"] == "affirmed"  (cough)
-```
-
-**Transformer-based (bvanaken/clinical-assertion-negation-bert) — learned:**
+The default strategy uses a BERT model fine-tuned on i2b2 assertion data for
+AFFIRMED/NEGATED/POSSIBLE detection, supplemented by rule-based ConText/NegEx
+for HISTORICAL and FAMILY contexts that the transformer doesn't cover.
 
 ```python
 from src.clinical.assertion import AssertionClassifier
@@ -263,6 +252,21 @@ result = classifier.predict(
     entity_end=29,
 )
 # result == {'label': 'ABSENT', 'negation': 'negated', 'score': 0.97}
+```
+
+**Rule-based (ConText/NegEx) — fast, no GPU, no download:**
+
+```python
+from src.clinical.negation import NegationDetector
+
+detector = NegationDetector()
+entities = [
+    {"text": "fever", "label": "DIAGNOSIS", "start": 15, "end": 20},
+    {"text": "cough", "label": "DIAGNOSIS", "start": 29, "end": 34},
+]
+annotated = detector.annotate_entities("Patient denies fever but has cough", entities)
+# annotated[0]["negation"] == "negated"   (fever)
+# annotated[1]["negation"] == "affirmed"  (cough)
 ```
 
 ### Shorthand Expansion
@@ -363,7 +367,6 @@ Medical_Code_Intelligence/
 │   │   ├── negation.py            # ConText/NegEx rule-based negation
 │   │   ├── assertion.py           # Transformer assertion classifier
 │   │   ├── shorthand.py           # Data-driven abbreviation expansion
-│   │   ├── abbreviation_disambiguator.py  # MeDAL ELECTRA disambiguation
 │   │   ├── _icd_fallback.py       # Offline fallback ICD codes
 │   │   └── _shorthand_fallback.py # Built-in ~280 abbreviations
 │   ├── data/
@@ -898,7 +901,6 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | DRG weights | [CMS IPPS Table 5](https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps) (FY 2026, auto-downloaded) | Public domain | ~770 DRGs |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
 | Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
-| Disambiguation | [McGill-NLP/electra-medal](https://huggingface.co/McGill-NLP/electra-medal) | MIT | 14M abstracts |
 
 ## Tests
 

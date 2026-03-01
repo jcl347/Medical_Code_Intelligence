@@ -156,33 +156,6 @@ DATASET_CONFIGS = {
         "input_column": "input",
         "output_column": "output",
     },
-    # -------------------------------------------------------------------
-    # Abbreviation disambiguation datasets
-    # -------------------------------------------------------------------
-    "medal": {
-        "hf_name": "McGill-NLP/medal",
-        "description": (
-            "MeDAL: 14M PubMed abstracts with abbreviation annotations "
-            "for pre-training abbreviation disambiguation models. "
-            "Each example has an abbreviation in context with the "
-            "correct expansion labeled."
-        ),
-        "format": "abbreviation_disambiguation",
-        "text_column": "text",
-        "location_column": "location",
-        "label_column": "label",
-    },
-    "casi": {
-        "hf_name": "mitclinicalml/clinical-ie",
-        "description": (
-            "CASI (Clinical Abbreviation Sense Inventory): 18,164 "
-            "examples across 41 clinical acronyms with labeled senses "
-            "from real clinical notes. Task #1 of the clinical-ie "
-            "benchmark for abbreviation disambiguation evaluation."
-        ),
-        "format": "abbreviation_disambiguation",
-        "task": "sense_disambiguation",
-    },
 }
 
 
