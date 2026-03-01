@@ -157,6 +157,7 @@ class TestPipelineToICD:
     def test_pipeline_entities_map_to_icd(self, lookup):
         pipeline = MedicalCodingPipeline(
             model_path=None, expand_shorthand=True, detect_negation=True,
+            negation_strategy="rules",
         )
         # Simulate entities extracted by the NER model
         text = "Pt with htn and dm2, denies cp."

@@ -217,7 +217,8 @@ class TestPipelineTransformerNegation:
             )
             MockCls.assert_called_once()
             assert pipeline.assertion_classifier is not None
-            assert pipeline.negation_detector is None
+            # Rule-based detector is also created for HISTORICAL/FAMILY supplement
+            assert pipeline.negation_detector is not None
 
     def test_pipeline_rules_creates_negation_detector(self):
         from src.clinical.pipeline import MedicalCodingPipeline
@@ -265,3 +266,105 @@ class TestPipelineTransformerNegation:
             assert len(results) == 1
             assert results[0].negation == "negated"
             mock_clf.annotate_entities.assert_called_once()
+
+    def test_default_strategy_is_transformer(self):
+        """Verify the default negation strategy is 'transformer'."""
+        with patch("src.clinical.assertion.AssertionClassifier") as MockCls:
+            from src.clinical.pipeline import MedicalCodingPipeline
+            pipeline = MedicalCodingPipeline(
+                model_path=None,
+                detect_negation=True,
+            )
+            MockCls.assert_called_once()
+            assert pipeline.negation_strategy == "transformer"
+            assert pipeline.assertion_classifier is not None
+            assert pipeline.negation_detector is not None
+
+    def test_hybrid_supplements_historical(self):
+        """Transformer marks PRESENT, but rules detect HISTORICAL context."""
+        with patch("src.clinical.assertion.AssertionClassifier") as MockCls:
+            mock_clf = MagicMock()
+            # Transformer says PRESENT (it can't detect HISTORICAL)
+            mock_clf.annotate_entities.return_value = [
+                {"text": "myocardial infarction", "label": "Disease",
+                 "start": 11, "end": 31, "negation": "affirmed",
+                 "assertion_label": "PRESENT", "assertion_score": 0.90},
+            ]
+            MockCls.return_value = mock_clf
+
+            from src.clinical.pipeline import MedicalCodingPipeline
+            pipeline = MedicalCodingPipeline(
+                model_path=None,
+                expand_shorthand=False,
+                detect_negation=True,
+                negation_strategy="transformer",
+            )
+
+            text = "History of myocardial infarction."
+            entities = [
+                {"text": "myocardial infarction", "label": "Disease",
+                 "start": 11, "end": 31},
+            ]
+            results = pipeline.process_with_entities(text, entities)
+
+            assert len(results) == 1
+            # Rule-based supplement should override to historical
+            assert results[0].negation == "historical"
+
+    def test_hybrid_supplements_family(self):
+        """Transformer marks PRESENT, but rules detect FAMILY context."""
+        with patch("src.clinical.assertion.AssertionClassifier") as MockCls:
+            mock_clf = MagicMock()
+            mock_clf.annotate_entities.return_value = [
+                {"text": "colon cancer", "label": "Disease",
+                 "start": 18, "end": 30, "negation": "affirmed",
+                 "assertion_label": "PRESENT", "assertion_score": 0.85},
+            ]
+            MockCls.return_value = mock_clf
+
+            from src.clinical.pipeline import MedicalCodingPipeline
+            pipeline = MedicalCodingPipeline(
+                model_path=None,
+                expand_shorthand=False,
+                detect_negation=True,
+                negation_strategy="transformer",
+            )
+
+            text = "Family history of colon cancer."
+            entities = [
+                {"text": "colon cancer", "label": "Disease",
+                 "start": 18, "end": 30},
+            ]
+            results = pipeline.process_with_entities(text, entities)
+
+            assert len(results) == 1
+            assert results[0].negation == "family"
+
+    def test_hybrid_preserves_transformer_negation(self):
+        """When transformer says ABSENT, rules should not override it."""
+        with patch("src.clinical.assertion.AssertionClassifier") as MockCls:
+            mock_clf = MagicMock()
+            mock_clf.annotate_entities.return_value = [
+                {"text": "fever", "label": "Symptom",
+                 "start": 15, "end": 20, "negation": "negated",
+                 "assertion_label": "ABSENT", "assertion_score": 0.97},
+            ]
+            MockCls.return_value = mock_clf
+
+            from src.clinical.pipeline import MedicalCodingPipeline
+            pipeline = MedicalCodingPipeline(
+                model_path=None,
+                expand_shorthand=False,
+                detect_negation=True,
+                negation_strategy="transformer",
+            )
+
+            text = "Patient denies fever."
+            entities = [
+                {"text": "fever", "label": "Symptom",
+                 "start": 15, "end": 20},
+            ]
+            results = pipeline.process_with_entities(text, entities)
+
+            assert len(results) == 1
+            assert results[0].negation == "negated"
