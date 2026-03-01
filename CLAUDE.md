@@ -9,7 +9,7 @@ The system chains six stages into a single `MedicalCodingPipeline`:
 1. **Shorthand Expansion** — Expands physician abbreviations ("htn" -> "hypertension") using a 104K-entry meta-inventory with character offset tracking so downstream NER spans stay aligned.
 2. **Named Entity Recognition** — Transformer-based token classification (BIO scheme) trained on an 8-source composite dataset to detect DIAGNOSIS entities. Supports adversarial training (FGM/PGD) for +0.5-1.5% F1.
 3. **Entity Post-Processing** — Filters stopword-only fragments and merges adjacent entity spans that were split by subword tokenization boundaries.
-4. **Assertion Detection** — Classifies each entity as affirmed, negated, possible, historical, hypothetical, or family-related. Two strategies: rule-based ConText/NegEx (122+ triggers, fast, no GPU) or transformer-based (bvanaken/clinical-assertion-negation-bert).
+4. **Assertion Detection** — Classifies each entity as affirmed, negated, possible, historical, hypothetical, or family-related. Default uses transformer-based assertion (bvanaken/clinical-assertion-negation-bert) supplemented by rule-based ConText/NegEx (122+ triggers) for historical/family contexts. Pure rule-based mode also available.
 5. **ICD-10-CM Resolution** — TF-IDF character n-gram matching against 51K ICD-10-CM code descriptions. Character 3/4-grams capture medical morphology ("cardio-", "-itis") without GPU.
 6. **MS-DRG Cost Estimation** — Maps ICD codes to Medicare Severity DRGs (~770 payment categories) and calculates revenue at risk from undercoding by comparing CC/MCC severity tiers.
 
@@ -26,7 +26,6 @@ src/
     negation.py        NegationDetector — rule-based ConText/NegEx assertion (100+ triggers)
     assertion.py       AssertionClassifier — transformer assertion (clinical-assertion-negation-bert)
     shorthand.py       ShorthandExpander — abbreviation expansion with offset tracking
-    abbreviation_disambiguator.py  AbbreviationDisambiguator — ELECTRA-MeDAL contextual sense selection
     _icd_fallback.py   Offline fallback: 45 common ICD codes for CI/testing
     _shorthand_fallback.py  Offline fallback: ~280 clinical abbreviations for CI/testing
   data/              # Dataset loading and preprocessing
@@ -62,7 +61,7 @@ configs/
 notebooks/
   demo_all_components.ipynb  Full pipeline demo + multi-model training comparison
 
-tests/               12 test files, ~2,900 lines total, 270 tests
+tests/               11 test files, ~2,900 lines total, 262 tests
 ```
 
 ## Quick Commands
@@ -71,7 +70,7 @@ tests/               12 test files, ~2,900 lines total, 270 tests
 # Install dependencies
 pip install -r requirements.txt
 
-# Run all tests (270 tests, ~25s on CPU)
+# Run all tests (262 tests, ~25s on CPU)
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -329,7 +328,7 @@ The best model by test F1 is automatically used in the Section 18 pipeline demo 
 - **Pipeline approach** (NER -> Assertion -> ICD -> DRG): Components are independently swappable. Matches clinical NLP patterns from MedSpacy, cTAKES, SciSpacy.
 - **Single DIAGNOSIS label** for ICD NER: Collapses Disease/Disorder/Phenotype into one label to maximize training signal across heterogeneous source corpora.
 - **TF-IDF character n-grams** for ICD linking: Character 3/4-grams capture medical morphology (e.g., "cardio-", "-itis"). Scales to 50K+ codes without GPU. Deterministic and interpretable.
-- **Dual negation strategies**: Rule-based (fast, deterministic, 122+ triggers, no GPU) and transformer-based (learned, handles edge cases). Default is rule-based.
+- **Hybrid negation detection**: Default uses transformer-based assertion (bvanaken/clinical-assertion-negation-bert) for AFFIRMED/NEGATED/POSSIBLE, supplemented by rule-based ConText/NegEx for HISTORICAL/FAMILY contexts. Pure rule-based mode available via `negation_strategy="rules"`.
 - **Adversarial training**: FGM/PGD perturbation on embeddings improves robustness and F1 with no architecture changes — just a training-time regularizer.
 - **8-source composite dataset**: Combines public corpora, clinical case reports, discharge summary examples, and template-generated examples targeting documented NER failure patterns (abbreviations, boundary errors, lab value confusion). Source 8 (discharge summary examples) specifically targets DRG-relevant diagnoses. Garbage labels from source corpora are cleaned automatically.
 - **MS-DRG cost scoping**: Maps extracted ICD codes to DRGs for financial impact estimation, with CC/MCC tier comparison to quantify revenue at risk. DRG weights sourced from CMS IPPS Table 5 (auto-downloaded).
@@ -356,7 +355,7 @@ Clinical Text
   -> ShorthandExpander (abbreviation expansion with character offset tracking)
   -> NER Model (transformer token classification, BIO scheme, optional adversarial training)
   -> post_process_entities() (stopword filter, fragment merging)
-  -> NegationDetector or AssertionClassifier (6 assertion statuses)
+  -> AssertionClassifier + NegationDetector hybrid (6 assertion statuses)
   -> ICDCodeLookup (TF-IDF matching against 51K codes)
   -> DRGCostEstimator (ICD-10 -> MS-DRG -> cost estimate + CC/MCC analysis)
   -> MedicalEntity list (text, label, negation, ICD codes, DRG info, scores)
@@ -364,7 +363,7 @@ Clinical Text
 
 ## Testing
 
-Tests use mocked models and fallback data to avoid network calls and GPU requirements. All tests should run on CPU in CI. 270 tests across 12 files.
+Tests use mocked models and fallback data to avoid network calls and GPU requirements. All tests should run on CPU in CI. 262 tests across 12 files.
 
 ```bash
 # Full suite
@@ -378,7 +377,7 @@ Key test files:
 - `test_negation.py`, `test_assertion.py` — assertion detection (200+ assertions)
 - `test_icd_ner_dataset.py` — composite dataset loading, garbage label cleaning
 - `test_pipeline.py`, `test_icd_pipeline.py` — end-to-end pipeline integration
-- `test_shorthand.py`, `test_disambiguation.py` — abbreviation handling
+- `test_shorthand.py` — abbreviation handling
 - `test_preprocessing.py` — tokenization and label alignment
 - `test_entity_postprocessing.py` — entity filtering and merging
 
