@@ -202,7 +202,7 @@ from src.clinical.drg_costs import DRGCostEstimator
 
 # Maps ICD-10-CM codes to MS-DRGs and estimates financial impact
 # DRG weights: auto-downloaded from CMS IPPS Table 5 (~770 DRGs)
-# DRG grouping: requires drgpy (pip install drgpy)
+# Requires: drgpy (pip install drgpy), openpyxl (pip install openpyxl)
 estimator = DRGCostEstimator()
 print(f"DRGs available: {estimator.num_drgs}")  # ~799 (drgpy + NBER)
 
@@ -274,7 +274,7 @@ annotated = detector.annotate_entities("Patient denies fever but has cough", ent
 ```python
 from src.clinical.shorthand import ShorthandExpander
 
-expander = ShorthandExpander()  # loads 104K abbreviations from Meta-Inventory
+expander = ShorthandExpander()  # loads ~78K abbreviations from Meta-Inventory (auto-downloaded)
 
 text = expander.expand("pt c/o sob, htn well controlled on meds")
 # "patient complaining of shortness of breath, hypertension well controlled on meds"
@@ -847,6 +847,7 @@ Historical diagnoses (PMH, "history of...") are included because they affect CC/
 **Data sources:**
 - **CMS IPPS Table 5** — All ~770 MS-DRG relative weights, auto-downloaded from CMS.gov on first use and cached locally at `~/.cache/medical_code_intelligence/`. The download uses fallback URLs to handle CMS's inconsistent naming conventions across fiscal years. Can also load from a local Excel file via `table5_path` parameter. Override download URL via `CMS_TABLE5_URL` environment variable.
 - `drgpy` library (v0.0.6) for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`). Note: drgpy supports MS-DRG v40 (FY 2023); CMS is on v42/v43 (FY 2025/2026). DRG assignments are approximate for research/NLP use.
+- `openpyxl` (required for reading the CMS Table 5 Excel file: `pip install openpyxl`)
 
 ## How the ICD Entity Linker Works
 
@@ -900,7 +901,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | MS-DRG grouper | [drgpy](https://pypi.org/project/drgpy/) | Apache 2.0 | ~770 DRGs |
 | DRG weights | [CMS IPPS Table 5](https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps) (FY 2026, auto-downloaded) | Public domain | ~770 DRGs |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
-| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
+| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | ~78K (filtered from 104K raw) |
 
 ## Tests
 
