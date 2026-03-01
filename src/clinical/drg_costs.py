@@ -387,17 +387,68 @@ class DRGCostEstimator:
         """Load DRG weights from a CMS Table 5 Excel file. Returns True on success."""
         try:
             import pandas as pd
-            df = pd.read_excel(path, dtype={"MS-DRG": str})
+
+            # CMS Table 5 Excel files have a title row before the column headers.
+            # Try header=1 first (standard CMS layout), then fall back to header=0.
+            df = None
+            for header_row in (1, 0):
+                df_try = pd.read_excel(path, header=header_row, dtype=str)
+                cols_upper = {c.upper().strip() for c in df_try.columns}
+                if "MS-DRG" in cols_upper or any("MS-DRG" in c.upper() for c in df_try.columns):
+                    df = df_try
+                    break
+            if df is None:
+                logger.warning("Could not find MS-DRG column in %s", path)
+                return False
+
+            # Normalise column lookup: map uppercase-stripped names to originals
+            col_map = {c.upper().strip(): c for c in df.columns}
+
+            def _find_col(*candidates):
+                """Find the first matching column (case-insensitive)."""
+                for cand in candidates:
+                    for col_upper, col_orig in col_map.items():
+                        if cand.upper() in col_upper:
+                            return col_orig
+                return None
+
+            drg_col = _find_col("MS-DRG")
+            title_col = _find_col("MS-DRG TITLE", "DRG TITLE")
+            mdc_col = _find_col("MDC")
+            type_col = _find_col("TYPE")
+            # CMS uses "Weights" columns; prefer the cap-applied column
+            weight_col = _find_col(
+                "WEIGHTS - 10% CAP", "WEIGHTS - BEFORE CAP",
+                "RELATIVE WEIGHT", "WEIGHT",
+            )
+            geo_col = _find_col("GEOMETRIC MEAN LOS", "GEOMETRIC MEAN")
+            arith_col = _find_col("ARITHMETIC MEAN LOS", "ARITHMETIC MEAN")
+
+            if drg_col is None or weight_col is None:
+                logger.warning(
+                    "CMS Table 5 missing required columns (MS-DRG, Weight). "
+                    "Found: %s", list(df.columns),
+                )
+                return False
+
             for _, row in df.iterrows():
-                code = str(row.get("MS-DRG", "")).zfill(3)
+                code_raw = str(row.get(drg_col, "")).strip()
+                if not code_raw or not code_raw.isdigit():
+                    continue
+                code = code_raw.zfill(3)
+                try:
+                    weight = float(row.get(weight_col, 1.0))
+                except (ValueError, TypeError):
+                    continue
                 self._weights[code] = {
-                    "title": str(row.get("MS-DRG Title", "")),
-                    "mdc": str(row.get("MDC", "")),
-                    "type": str(row.get("Type", "")),
-                    "weight": float(row.get("Relative Weight", 1.0)),
-                    "geo_los": float(row.get("Geometric Mean LOS", 0)),
-                    "arith_los": float(row.get("Arithmetic Mean LOS", 0)),
+                    "title": str(row.get(title_col, "")) if title_col else "",
+                    "mdc": str(row.get(mdc_col, "")) if mdc_col else "",
+                    "type": str(row.get(type_col, "")) if type_col else "",
+                    "weight": weight,
+                    "geo_los": float(row.get(geo_col, 0)) if geo_col else 0.0,
+                    "arith_los": float(row.get(arith_col, 0)) if arith_col else 0.0,
                 }
+
             logger.info(
                 "Loaded %d DRG weights from %s", len(self._weights), path,
             )

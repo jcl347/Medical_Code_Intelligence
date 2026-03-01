@@ -52,6 +52,17 @@ _ENGLISH_STOPWORDS = frozenset({
     "add", "big", "own", "off", "top", "yes", "red", "per", "nor",
 })
 
+# Drug names and clinical terms that should NOT be expanded.
+# The Meta-Inventory treats some common drug names as abbreviations
+# (e.g., "aspirin" -> "acetylsalicylic acid") which is unhelpful.
+_CLINICAL_TERM_EXCLUSIONS = frozenset({
+    "aspirin", "ibuprofen", "tylenol", "heparin", "insulin",
+    "morphine", "codeine", "warfarin", "digoxin", "atropine",
+    "epinephrine", "dopamine", "lidocaine", "amoxicillin",
+    "metformin", "lisinopril", "atorvastatin", "omeprazole",
+    "metoprolol", "amlodipine", "furosemide", "prednisone",
+})
+
 
 def _download_meta_inventory(cache_dir: str) -> Optional[str]:
     """
@@ -137,7 +148,14 @@ def _parse_meta_inventory(csv_path: str, min_length: int = 2) -> Tuple[Dict, Dic
 
     try:
         import pandas as pd
-        df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+
+        # Auto-detect delimiter: the Zenodo Meta-Inventory uses pipe ('|')
+        # while user-supplied CSVs may use commas.
+        with open(csv_path, "r", encoding="utf-8") as _f:
+            first_line = _f.readline()
+        sep = "|" if first_line.count("|") > first_line.count(",") else ","
+
+        df = pd.read_csv(csv_path, sep=sep, dtype=str, keep_default_na=False)
 
         # Auto-detect column names (handle different formats)
         sf_col = next((c for c in df.columns if c.upper() in ("SF", "SHORT_FORM", "ABBREVIATION")), None)
@@ -151,10 +169,12 @@ def _parse_meta_inventory(csv_path: str, min_length: int = 2) -> Tuple[Dict, Dic
         for sf, group in df.groupby(sf_col):
             sf_lower = str(sf).strip().lower()
 
-            # Filter: skip too-short or common English words
+            # Filter: skip too-short, common English words, or drug names
             if len(sf_lower) < min_length:
                 continue
             if sf_lower in _ENGLISH_STOPWORDS:
+                continue
+            if sf_lower in _CLINICAL_TERM_EXCLUSIONS:
                 continue
 
             senses = [str(lf).strip() for lf in group[lf_col].unique() if str(lf).strip()]
@@ -180,14 +200,17 @@ def _parse_meta_inventory(csv_path: str, min_length: int = 2) -> Tuple[Dict, Dic
         logger.warning("pandas not available; falling back to csv module for Meta-Inventory.")
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
+                first_line = f.readline()
+                delimiter = "|" if first_line.count("|") > first_line.count(",") else ","
+                f.seek(0)
+                reader = csv.DictReader(f, delimiter=delimiter)
                 _senses: Dict[str, List[str]] = {}
                 _preferred: Dict[str, str] = {}
                 for row in reader:
                     sf = (row.get("SF") or row.get("Short_Form") or row.get("abbreviation") or "").strip().lower()
                     lf = (row.get("LF") or row.get("Long_Form") or row.get("expansion") or "").strip()
                     plf = (row.get("PLF") or row.get("Preferred_Long_Form") or "").strip()
-                    if not sf or not lf or len(sf) < min_length or sf in _ENGLISH_STOPWORDS:
+                    if not sf or not lf or len(sf) < min_length or sf in _ENGLISH_STOPWORDS or sf in _CLINICAL_TERM_EXCLUSIONS:
                         continue
                     _senses.setdefault(sf, [])
                     if lf not in _senses[sf]:

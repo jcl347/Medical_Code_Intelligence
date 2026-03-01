@@ -1274,6 +1274,14 @@ def _load_maccrobat_diseases(
         if not tokens or not ner_labels_raw:
             continue
 
+        # MACCROBAT stores ner_labels as integer indices into label_names.
+        # Convert indices to label name strings before processing.
+        if ner_labels_raw and isinstance(ner_labels_raw[0], int):
+            ner_labels_raw = [
+                label_names[idx] if idx < len(label_names) else "O"
+                for idx in ner_labels_raw
+            ]
+
         # Map original labels to DIAGNOSIS
         mapped_labels = []
         for label in ner_labels_raw:
