@@ -52,7 +52,7 @@ def build_training_args(config: NERConfig) -> TrainingArguments:
         # Optimiser
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
+        warmup_steps=config.warmup_steps,
         max_grad_norm=config.max_grad_norm,
         lr_scheduler_type=config.lr_scheduler_type,
         # Mixed precision

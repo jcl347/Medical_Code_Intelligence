@@ -177,7 +177,7 @@ class NERConfig:
     per_device_eval_batch_size: int = 32
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
-    warmup_ratio: float = 0.1
+    warmup_steps: float = 0.1             # float in [0,1) = ratio of total steps; int = exact steps
     max_grad_norm: float = 1.0
     lr_scheduler_type: str = "linear"
 

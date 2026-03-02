@@ -133,6 +133,9 @@ def build_ner_model(
             quantization_config=bnb_config,
             ignore_mismatched_sizes=True,
         )
+        # Prepare for k-bit training: cast layernorm to fp32, freeze base weights
+        from peft import prepare_model_for_kbit_training
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     else:
         model = AutoModelForTokenClassification.from_pretrained(
             model_name_or_path,

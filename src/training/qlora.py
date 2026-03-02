@@ -139,7 +139,6 @@ def build_qlora_model(
         model_name_or_path,
         config=model_config,
         quantization_config=bnb_config,
-        device_map="auto",
         ignore_mismatched_sizes=True,
     )
 
