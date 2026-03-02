@@ -3,6 +3,36 @@
 
 **ICD-10 NER system** for extracting diagnosis mentions from clinical text, resolving them to ICD-10-CM codes, estimating MS-DRG cost impact, with adversarial training, learned assertion detection, and physician shorthand expansion.
 
+## Interactive Notebook — Full Pipeline Demo & Training
+
+The [`notebooks/demo_all_components.ipynb`](notebooks/demo_all_components.ipynb) notebook is the best starting point for understanding and using this system. It provides a complete, runnable walkthrough of every pipeline component with real clinical text examples.
+
+**What the notebook covers (21 sections):**
+
+| Section | What it demonstrates |
+|---------|---------------------|
+| 1-2 | Configuration & setup — `NERConfig`, model/dataset configs, dependency checks |
+| 3-4 | **Shorthand expansion** — 78K+ abbreviations from the Meta-Inventory with offset tracking |
+| 5-6 | **Negation detection** — rule-based ConText/NegEx with 122+ triggers, 6 assertion statuses |
+| 7-8 | **ICD-10-CM code resolution** — TF-IDF character n-gram matching against 51K codes |
+| 9-10 | **MS-DRG cost estimation** — CMS Table 5 weights, CC/MCC tier comparison, revenue-at-risk |
+| 11-12 | Entity post-processing — stopword filtering, fragment merging, BIO extraction |
+| 13-14 | Composite dataset loading — 8-source ICD NER dataset with label cleaning |
+| 15-16 | **Full pipeline demo** — end-to-end processing of clinical notes with JSON export |
+| 17 | **Production training: PubMedBERT + FGM adversarial** — trains on the full ICD NER dataset with production-grade hyperparameters (cosine LR, label smoothing, patience 10) |
+| 18 | **ICD-trained pipeline** — uses the best model from training for 3 clinical case studies with full DRG cost analysis (ICU admission, cardiology consult, sepsis) |
+| 19 | **GatorTron Large QLoRA** — fine-tunes the 3.9B-parameter GatorTron Large model using 4-bit quantization + LoRA adapters on the ICD NER dataset, with head-to-head evaluation against PubMedBERT |
+| 20-21 | CLI reference, test suite, and summary |
+
+**Quick start:**
+
+```bash
+pip install -r requirements.txt
+cd notebooks && jupyter notebook demo_all_components.ipynb
+```
+
+All demo cells run on CPU using built-in fallback data (no GPU or network required). Training sections (17, 19) benefit from GPU acceleration.
+
 ## End-to-End ICD NER Pipeline
 
 The core workflow: **Train** a diagnosis NER model (with optional adversarial training), **Predict** entities from clinical text, **Resolve** to ICD-10-CM codes, **Estimate** MS-DRG cost impact, **Evaluate** with entity-level F1.
@@ -202,7 +232,7 @@ from src.clinical.drg_costs import DRGCostEstimator
 
 # Maps ICD-10-CM codes to MS-DRGs and estimates financial impact
 # DRG weights: auto-downloaded from CMS IPPS Table 5 (~770 DRGs)
-# DRG grouping: requires drgpy (pip install drgpy)
+# Requires: drgpy (pip install drgpy), openpyxl (pip install openpyxl)
 estimator = DRGCostEstimator()
 print(f"DRGs available: {estimator.num_drgs}")  # ~799 (drgpy + NBER)
 
@@ -274,7 +304,7 @@ annotated = detector.annotate_entities("Patient denies fever but has cough", ent
 ```python
 from src.clinical.shorthand import ShorthandExpander
 
-expander = ShorthandExpander()  # loads 104K abbreviations from Meta-Inventory
+expander = ShorthandExpander()  # loads ~78K abbreviations from Meta-Inventory (auto-downloaded)
 
 text = expander.expand("pt c/o sob, htn well controlled on meds")
 # "patient complaining of shortness of breath, hypertension well controlled on meds"
@@ -343,9 +373,11 @@ For ICD NER on clinical notes, **`bio_clinicalbert`** or **`pubmedbert`** are re
 
 ## Interactive Notebook
 
-`notebooks/demo_all_components.ipynb` demonstrates every pipeline component interactively — shorthand expansion, negation detection, ICD-10-CM linking, DRG cost estimation, entity post-processing, evaluation metrics, adversarial training, and the full end-to-end pipeline. All cells run on CPU using built-in fallback data (no GPU or network required).
+`notebooks/demo_all_components.ipynb` demonstrates every pipeline component interactively — shorthand expansion, negation detection, ICD-10-CM linking, DRG cost estimation, entity post-processing, evaluation metrics, adversarial training, and the full end-to-end pipeline. All cells run on CPU using built-in fallback data (no GPU or network required). See the detailed section breakdown at the top of this README.
 
-**Section 17 — Multi-Model Training Comparison**: Trains all four 110M BERT models (PubMedBERT, BioBERT, Bio_ClinicalBERT, SciBERT) on the full ICD NER composite dataset with production-grade hyperparameters: LR=2e-5, cosine scheduler, effective batch size 32, label smoothing 0.05, patience 10. Train+val data is merged for maximum training signal, with 10% held out for early stopping and the test set reserved for final comparison. See the [CLAUDE.md](CLAUDE.md) Multi-Model Training Comparison section for details.
+**Section 17 — PubMedBERT + FGM Adversarial Training**: Trains PubMedBERT on the full ICD NER composite dataset with production-grade hyperparameters: LR=2e-5, cosine scheduler, effective batch size 32, label smoothing 0.05, patience 10, FGM adversarial training for +0.5-1.5% F1. Train+val data is merged for maximum training signal, with 10% held out for early stopping and the test set reserved for final comparison.
+
+**Section 19 — GatorTron Large QLoRA**: Fine-tunes GatorTron Large (3.9B params, pre-trained on 90B words of clinical text) on the same ICD NER dataset using QLoRA (4-bit NF4 quantization + LoRA rank-16 adapters). Compresses the model from ~62 GB to ~15 GB VRAM. Includes head-to-head test set evaluation against PubMedBERT.
 
 ```bash
 cd notebooks && jupyter notebook demo_all_components.ipynb
@@ -847,6 +879,7 @@ Historical diagnoses (PMH, "history of...") are included because they affect CC/
 **Data sources:**
 - **CMS IPPS Table 5** — All ~770 MS-DRG relative weights, auto-downloaded from CMS.gov on first use and cached locally at `~/.cache/medical_code_intelligence/`. The download uses fallback URLs to handle CMS's inconsistent naming conventions across fiscal years. Can also load from a local Excel file via `table5_path` parameter. Override download URL via `CMS_TABLE5_URL` environment variable.
 - `drgpy` library (v0.0.6) for ICD-10 to MS-DRG grouper logic (optional: `pip install drgpy`). Note: drgpy supports MS-DRG v40 (FY 2023); CMS is on v42/v43 (FY 2025/2026). DRG assignments are approximate for research/NLP use.
+- `openpyxl` (required for reading the CMS Table 5 Excel file: `pip install openpyxl`)
 
 ## How the ICD Entity Linker Works
 
@@ -900,7 +933,7 @@ Character n-grams capture morphological patterns critical for medical terms (e.g
 | MS-DRG grouper | [drgpy](https://pypi.org/project/drgpy/) | Apache 2.0 | ~770 DRGs |
 | DRG weights | [CMS IPPS Table 5](https://www.cms.gov/medicare/payment/prospective-payment-systems/acute-inpatient-pps) (FY 2026, auto-downloaded) | Public domain | ~770 DRGs |
 | Assertion model | [bvanaken/clinical-assertion-negation-bert](https://huggingface.co/bvanaken/clinical-assertion-negation-bert) | Apache 2.0 | Fine-tuned on i2b2 |
-| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | 104,057 |
+| Abbreviations | [Meta-Inventory](https://zenodo.org/records/4567594) | CC-BY-4.0 | ~78K (filtered from 104K raw) |
 
 ## Tests
 

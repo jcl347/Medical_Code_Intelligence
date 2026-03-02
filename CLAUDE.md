@@ -6,7 +6,7 @@ Medical Code Intelligence is a production-grade clinical NLP system that solves 
 
 The system chains six stages into a single `MedicalCodingPipeline`:
 
-1. **Shorthand Expansion** — Expands physician abbreviations ("htn" -> "hypertension") using a 104K-entry meta-inventory with character offset tracking so downstream NER spans stay aligned.
+1. **Shorthand Expansion** — Expands physician abbreviations ("htn" -> "hypertension") using a ~78K-entry meta-inventory (filtered from 104K raw entries — English stopwords, drug names, and sub-2-char entries excluded) with character offset tracking so downstream NER spans stay aligned. The Zenodo CSV is pipe-delimited (`|`).
 2. **Named Entity Recognition** — Transformer-based token classification (BIO scheme) trained on an 8-source composite dataset to detect DIAGNOSIS entities. Supports adversarial training (FGM/PGD) for +0.5-1.5% F1.
 3. **Entity Post-Processing** — Filters stopword-only fragments and merges adjacent entity spans that were split by subword tokenization boundaries.
 4. **Assertion Detection** — Classifies each entity as affirmed, negated, possible, historical, hypothetical, or family-related. Default uses transformer-based assertion (bvanaken/clinical-assertion-negation-bert) supplemented by rule-based ConText/NegEx (122+ triggers) for historical/family contexts. Pure rule-based mode also available.
@@ -228,6 +228,7 @@ The `DRGCostEstimator` in `src/clinical/drg_costs.py` maps ICD-10-CM codes to Me
 **Data sources**:
 - **CMS IPPS Table 5** — All ~770 MS-DRG relative weights (auto-downloaded from CMS.gov on first use, cached locally at `~/.cache/medical_code_intelligence/`). Uses fallback URLs to handle CMS's inconsistent naming conventions across fiscal years. Can also load from a local Excel file via `table5_path`. Override download URL via `CMS_TABLE5_URL` environment variable.
 - `drgpy` library (v0.0.6) for ICD-10 to MS-DRG grouper logic (optional, `pip install drgpy`). Note: drgpy supports MS-DRG v40 (FY 2023); CMS is on v42/v43 (FY 2025/2026). DRG assignments are approximate for research/NLP use.
+- `openpyxl` for reading the CMS Table 5 Excel file (`pip install openpyxl`). The Excel file has a title row before column headers (parsed with `header=1`) and uses column names like "Weights - 10% Cap Applied" (not "Relative Weight").
 - FY 2026 national standardized amount: $6,752.61
 
 ```python
@@ -393,7 +394,7 @@ Key test files:
 
 ## Notebooks
 
-The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all four 110M-parameter BERT-family models on the ICD NER dataset with production-grade hyperparameters.
+The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively. Section 17 trains PubMedBERT with FGM adversarial training on the ICD NER dataset with production-grade hyperparameters. Section 19 fine-tunes GatorTron Large (3.9B params) using QLoRA (4-bit quantization + LoRA rank-16 adapters) on the same dataset and evaluates head-to-head against PubMedBERT on the held-out test set.
 
 ### Keeping the Notebook Up to Date
 
@@ -426,13 +427,13 @@ When making changes to the repository, update `README.md` to reflect those chang
 ## Common Pitfalls
 
 - The `icd_ner` dataset is built at runtime by merging up to 8 sources (5 HuggingFace datasets + 3 built-in). First load downloads ~500MB+. Subsequent loads use cache. Sources 6 (MedMentions) and 7 (MACCROBAT) are optional and skipped gracefully if unavailable. Source 8 (discharge summary examples) is built-in and always available.
-- MedMentions uses ibm/MedMentions-ZS (parquet, standard `load_dataset()`) as the primary source, with bigbio/medmentions parquet files as a fallback. MACCROBAT loads via direct JSON download from the repository (bypasses deprecated loading script).
+- MedMentions uses ibm/MedMentions-ZS (parquet, standard `load_dataset()`) as the primary source, with bigbio/medmentions parquet files as a fallback. MACCROBAT loads via direct JSON download from the repository (bypasses deprecated loading script). The JSON stores `ner_labels` as integer indices into `all_ner_labels` — these are mapped to label strings before processing.
 - GatorTron-base (345M params) needs ~2.5x more GPU memory than the 110M models. Use `scripts/train_gatortron_qlora.py` for QLoRA fine-tuning (75% less memory), or reduce batch size / use gradient accumulation for full fine-tuning. GatorTron-medium (~1B) and GatorTron-large (~3.9B) should always use QLoRA.
 - Adversarial training (`--adversarial`) roughly doubles training time (FGM) or quadruples it (PGD). The F1 gain is +0.5-1.5% on strong baselines.
 - The ICD code lookup downloads 51K codes from `atta00/icd10-codes` on first use. Falls back to 45 built-in codes if download fails.
-- MS-DRG grouping requires `drgpy` (`pip install drgpy`). DRG weight data is auto-downloaded from CMS IPPS Table 5 on first use and cached at `~/.cache/medical_code_intelligence/`. Without drgpy or CMS weights, DRG cost estimation returns None.
+- MS-DRG grouping requires `drgpy` (`pip install drgpy`) and `openpyxl` (`pip install openpyxl`) for reading the CMS Table 5 Excel file. DRG weight data is auto-downloaded from CMS IPPS Table 5 on first use and cached at `~/.cache/medical_code_intelligence/`. Without drgpy or CMS weights, DRG cost estimation returns None.
 - QLoRA fine-tuning requires `peft>=0.7.0` and `bitsandbytes>=0.41.0` (in requirements.txt). 4-bit quantization requires a CUDA GPU. Use `--no-4bit` for CPU-only LoRA training.
 - The `train_gatortron_qlora.py` script accepts both config keys (e.g., `gatortron-base`) and full HuggingFace IDs (e.g., `UFNLP/gatortron-base`). Keys are resolved via `MODEL_CONFIGS`.
-- Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). Network failures are handled gracefully.
+- Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). The Zenodo Meta-Inventory CSV is pipe-delimited (`|`), not comma-delimited. Common drug names (aspirin, metformin, etc.) are excluded from expansion via `_CLINICAL_TERM_EXCLUSIONS`. Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.
-- The notebook's Section 17 trains all models on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). On CPU this will be slow; GPU recommended for the training cells.
+- The notebook's Section 17 trains PubMedBERT with FGM adversarial training on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). A commented multi-model comparison block is also available. Section 19 fine-tunes GatorTron Large (3.9B params) with QLoRA (4-bit + LoRA r=16) on the same dataset, with head-to-head evaluation against PubMedBERT. On CPU training will be slow; GPU recommended.
