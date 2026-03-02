@@ -394,7 +394,7 @@ Key test files:
 
 ## Notebooks
 
-The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively and runs a full multi-model training comparison (Section 17) across all four 110M-parameter BERT-family models on the ICD NER dataset with production-grade hyperparameters.
+The `notebooks/demo_all_components.ipynb` notebook demonstrates every pipeline component interactively. Section 17 trains PubMedBERT with FGM adversarial training on the ICD NER dataset with production-grade hyperparameters. Section 19 fine-tunes GatorTron Large (3.9B params) using QLoRA (4-bit quantization + LoRA rank-16 adapters) on the same dataset and evaluates head-to-head against PubMedBERT on the held-out test set.
 
 ### Keeping the Notebook Up to Date
 
@@ -436,4 +436,4 @@ When making changes to the repository, update `README.md` to reflect those chang
 - The `train_gatortron_qlora.py` script accepts both config keys (e.g., `gatortron-base`) and full HuggingFace IDs (e.g., `UFNLP/gatortron-base`). Keys are resolved via `MODEL_CONFIGS`.
 - Shorthand expansion tries 3 data sources in order (Zenodo -> MEDIALpy -> built-in). The Zenodo Meta-Inventory CSV is pipe-delimited (`|`), not comma-delimited. Common drug names (aspirin, metformin, etc.) are excluded from expansion via `_CLINICAL_TERM_EXCLUSIONS`. Network failures are handled gracefully.
 - The `--model-path` flag in predict.py/evaluate.py expects a directory containing a saved HuggingFace model (config.json + model weights), not a model key.
-- The notebook's Section 17 trains PubMedBERT with FGM adversarial training on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). A commented multi-model comparison block is also available. Section 19 demonstrates GatorTron QLoRA fine-tuning. On CPU training will be slow; GPU recommended.
+- The notebook's Section 17 trains PubMedBERT with FGM adversarial training on the full ICD dataset for up to 30 epochs (early stopping patience=10, cosine LR schedule). A commented multi-model comparison block is also available. Section 19 fine-tunes GatorTron Large (3.9B params) with QLoRA (4-bit + LoRA r=16) on the same dataset, with head-to-head evaluation against PubMedBERT. On CPU training will be slow; GPU recommended.
